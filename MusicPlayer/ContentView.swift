@@ -2,14 +2,16 @@
 import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
+import Combine
 
 struct ContentView: View {
     
     @StateObject private var audioEngine = AudioEngine()
     @StateObject private var library = LibraryManager()
+    private let autosave = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
     
     var body: some View {
-        VStack(spacing: 24) {
+        VStack(spacing: 16) {
             
             Group {
                 if let artwork = audioEngine.metadata.artwork {
@@ -84,14 +86,17 @@ struct ContentView: View {
             
             HStack {
                 Button("Import Music") { openFile() }
-                    .disabled(library.isImporting)
+                    .disabled(library.isImporting || library.isRestoring)
                 Spacer()
                 Text("\(library.tracks.count) songs")
                     .foregroundStyle(.secondary)
-                if library.isImporting { ProgressView().controlSize(.small) }
+                if library.isImporting || library.isRestoring { ProgressView().controlSize(.small) }
             }
             if !library.importError.isEmpty {
                 Text(library.importError).font(.caption).foregroundStyle(.red)
+            }
+            if !library.storageError.isEmpty {
+                Text(library.storageError).font(.caption).foregroundStyle(.red)
             }
             List(library.tracks) { track in
                 Button {
@@ -113,14 +118,27 @@ struct ContentView: View {
                             Image(systemName: audioEngine.isPlaying ? "speaker.wave.2.fill" : "speaker.fill")
                                 .foregroundStyle(Color.accentColor)
                         }
-                        Text(track.metadata.format).font(.caption).foregroundStyle(.secondary)
+                        if !track.available {
+                            Text("Unavailable").font(.caption).foregroundStyle(.orange)
+                        } else {
+                            Text(track.metadata.format).font(.caption).foregroundStyle(.secondary)
+                        }
                     }
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .disabled(library.isRestoring)
+                .contextMenu {
+                    Button("Locate File…") { locateFile(track) }
+                        .disabled(library.isImporting || library.isRestoring)
+                    Button("Remove from Library", role: .destructive) {
+                        library.remove(track, using: audioEngine)
+                    }
+                    .disabled(library.isImporting || library.isRestoring)
+                }
             }
-            .frame(minHeight: 120, idealHeight: 180)
-            if !library.upNext.isEmpty {
+            .frame(minHeight: 140, idealHeight: 220)
+            if !library.shuffle && !library.upNext.isEmpty {
                 HStack {
                     Text("Up Next").font(.caption).bold()
                     Spacer()
@@ -136,7 +154,10 @@ struct ContentView: View {
                         get: { audioEngine.currentTime },
                         set: { audioEngine.seek(to: $0) }
                     ),
-                    in: 0...max(audioEngine.duration, 1)
+                    in: 0...max(audioEngine.duration, 1),
+                    onEditingChanged: { editing in
+                        if !editing { library.save(using: audioEngine) }
+                    }
                 )
                 .disabled(audioEngine.duration == 0)
                 
@@ -153,28 +174,29 @@ struct ContentView: View {
             }
             
             HStack(spacing: 24) {
-                Button { library.toggleShuffle() } label: {
+                Button { library.toggleShuffle(); library.save(using: audioEngine) } label: {
                     Image(systemName: "shuffle")
                         .foregroundStyle(library.shuffle ? Color.accentColor : Color.secondary)
                 }
-                .help("Shuffle")
-                Button { library.previous(using: audioEngine) } label: {
+                .help(library.shuffle ? "Shuffle on" : "Shuffle off")
+                .disabled(library.isRestoring)
+                Button { library.previous(using: audioEngine); library.save(using: audioEngine) } label: {
                     Image(systemName: "backward.fill")
                 }
                 .disabled(library.currentID == nil)
                 .help("Previous")
-                Button { audioEngine.togglePlayback() } label: {
+                Button { library.playOrPause(using: audioEngine); library.save(using: audioEngine) } label: {
                     Image(systemName: audioEngine.isPlaying ? "pause.fill" : "play.fill")
                         .font(.system(size: 28))
                 }
-                .disabled(audioEngine.duration == 0)
+                .disabled(library.isRestoring || (audioEngine.duration == 0 && (library.currentID != nil || !library.tracks.contains { $0.available })))
                 .help("Play or pause")
                 Button { library.next(using: audioEngine) } label: {
                     Image(systemName: "forward.fill")
                 }
                 .disabled(!library.canGoNext)
                 .help("Next")
-                Button { library.cycleRepeat() } label: {
+                Button { library.cycleRepeat(); library.save(using: audioEngine) } label: {
                     Image(systemName: library.repeatMode == .one ? "repeat.1" : "repeat")
                         .foregroundStyle(library.repeatMode == .off ? Color.secondary : Color.accentColor)
                 }
@@ -188,13 +210,20 @@ struct ContentView: View {
             }
         }
         .padding(24)
-        .frame(minWidth: 540, minHeight: 640)
+        .frame(minWidth: 540, idealWidth: 640, minHeight: 700, idealHeight: 850)
         .onAppear {
             audioEngine.onFinished = { [weak library, weak audioEngine] in
                 guard let library, let audioEngine else { return }
                 library.finished(using: audioEngine)
+                library.save(using: audioEngine)
             }
         }
+        .task { await library.restore(using: audioEngine) }
+        .onReceive(autosave) { _ in library.save(using: audioEngine, periodic: true) }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+            library.save(using: audioEngine)
+        }
+        .onDisappear { library.save(using: audioEngine) }
     }
     
     private func formatTime(_ time: Double) -> String {
@@ -216,7 +245,20 @@ struct ContentView: View {
         
         if panel.runModal() == .OK {
             let urls = panel.urls
-            Task { await library.importFiles(urls) }
+            Task {
+                await library.importFiles(urls)
+                library.save(using: audioEngine)
+            }
+        }
+    }
+
+    private func locateFile(_ track: Track) {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.audio]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        if panel.runModal() == .OK, let url = panel.url {
+            Task { await library.relocate(track, to: url, using: audioEngine) }
         }
     }
 }
