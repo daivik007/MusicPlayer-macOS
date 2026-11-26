@@ -3,6 +3,9 @@ const path = require('node:path');
 const {openTest,closeTests} = require('./self-tests.cjs');
 const { trusted, drmAllowed, syncAllowed } = require('./permission-policy.cjs');
 const {installMediaTrace}=require('./media-trace.cjs');
+const {installWorkerTrace}=require('./worker-trace.cjs');
+const freshSession=process.argv.includes('--fresh-session');
+const partition=freshSession?'spotify-ecs-fresh-'+require('node:crypto').randomUUID():'persist:spotify-ecs';
 let mediaTrace;
 
 // Independent persistent profile; never read Chrome, Phi or native app data.
@@ -15,7 +18,7 @@ function record(event, details = {}) {
   trace.push({ms: Date.now() - started, event, ...details});
   if (trace.length > 180) trace.shift();
 }
-function resetTrace() { trace.length = 0; started = Date.now(); record('reset'); if(win && !win.isDestroyed() && trusted(win.webContents.getURL())) win.webContents.executeJavaScriptInIsolatedWorld(1001,[{code:'if(globalThis.__ecsTrace) globalThis.__ecsTrace.length=0'}]).catch(()=>{}); }
+function resetTrace() { trace.length = 0; started = Date.now(); record('reset'); if(win && !win.isDestroyed() && trusted(win.webContents.getURL())) win.webContents.executeJavaScriptInIsolatedWorld(1001,[{code:'if(globalThis.__ecsTrace) globalThis.__ecsTrace.length=0; if(globalThis.__ecsWorkerTrace) globalThis.__ecsWorkerTrace.length=0'}]).catch(()=>{}); }
 function permissionLabel(p) { return typeof p==='string' && /^[A-Za-z][A-Za-z0-9-]{0,63}$/.test(p) ? p : 'unknown'; }
 function componentVersions() {
   try {
@@ -61,6 +64,15 @@ async function diagnostics() {
       };
       return {
         userAgent: navigator.userAgent,
+        browserIdentity: {
+          platform: navigator.platform,
+          userAgentData: navigator.userAgentData?.toJSON?.() ?? null,
+          maxTouchPoints: navigator.maxTouchPoints,
+          viewport: {width:innerWidth,height:innerHeight,devicePixelRatio},
+          finePointer: matchMedia('(pointer: fine)').matches,
+          hover: matchMedia('(hover: hover)').matches,
+          secureContext: isSecureContext
+        },
         bundleHints: (() => {
           const names = [...Array.from(document.scripts, s => s.src), ...performance.getEntriesByType('resource').filter(r => r.initiatorType === 'script').map(r => r.name)];
           const paths = names.flatMap(n => { try { const u = new URL(n); return [u.pathname]; } catch { return []; } });
@@ -80,6 +92,7 @@ async function diagnostics() {
       };
     })()`);
     report.domMediaEvents = await win.webContents.executeJavaScriptInIsolatedWorld(1001,[{code:'globalThis.__ecsTrace ?? []'}]).catch(()=>[]);
+    report.sessionMode = freshSession ? 'fresh-in-memory' : 'persistent';
     report.serviceWorker = await win.webContents.executeJavaScript(`(async()=>{
       if(!navigator.serviceWorker)return {available:false};
       try{
@@ -90,6 +103,7 @@ async function diagnostics() {
           navigationType:performance.getEntriesByType('navigation')[0]?.type??null};
       }catch(e){return {available:true,error:e.name};}
     })()`).catch(()=>({available:false}));
+    report.workerPageEvents=await win.webContents.executeJavaScriptInIsolatedWorld(1001,[{code:'globalThis.__ecsWorkerTrace ?? []'}]).catch(()=>[]);
     report.chromiumMediaTrace=mediaTrace?.status()??'unavailable';
     report.components = componentVersions();
     report.runtime = { audible: win.webContents.isCurrentlyAudible(), muted: win.webContents.isAudioMuted() };
@@ -99,9 +113,10 @@ async function diagnostics() {
   } catch { console.log('Diagnostics failed or navigation interrupted.'); }
 }
 async function createWindow() {
-  win = new BrowserWindow({width:1100,height:760,title:'MusicPlayer ECS experiment',
-    webPreferences:{nodeIntegration:false,contextIsolation:true,sandbox:true,webSecurity:true,partition:'persist:spotify-ecs'}});
+  win = new BrowserWindow({width:1100,height:760,title:freshSession?'MusicPlayer ECS — Fresh session':'MusicPlayer ECS experiment',
+    webPreferences:{nodeIntegration:false,contextIsolation:true,sandbox:true,webSecurity:true,partition}});
   const wc = win.webContents;
+  installWorkerTrace(wc.session,record,trusted);
   wc.on('will-navigate', (e,url) => { if (!allowed(url)) e.preventDefault(); });
   wc.on('will-redirect', (e,url) => { if (!allowed(url)) e.preventDefault(); });
   wc.setWindowOpenHandler(({url}) => {
@@ -128,6 +143,15 @@ async function createWindow() {
     wc.executeJavaScriptInIsolatedWorld(1001,[{code:`(() => {
       if(globalThis.__ecsTrace) return;
       const events=[];globalThis.__ecsTrace=events;
+      const workerEvents=[];globalThis.__ecsWorkerTrace=workerEvents;
+      const pushWorker=(event,state)=>{workerEvents.push({event,state});if(workerEvents.length>40)workerEvents.shift();};
+      if(navigator.serviceWorker){
+        const watched=new WeakSet();
+        const watch=w=>{if(!w||watched.has(w))return;watched.add(w);pushWorker('worker-state',w.state);w.addEventListener('statechange',()=>pushWorker('worker-state',w.state));w.addEventListener('error',()=>pushWorker('worker-error',w.state));};
+        const watchReg=r=>{watch(r.installing);watch(r.waiting);watch(r.active);r.addEventListener('updatefound',()=>watch(r.installing));};
+        navigator.serviceWorker.addEventListener('controllerchange',()=>pushWorker('controller-change',navigator.serviceWorker.controller?.state??null));
+        navigator.serviceWorker.getRegistrations().then(rs=>rs.forEach(watchReg)).catch(e=>pushWorker('registration-query-error',e.name));
+      }
       for(const name of ['loadstart','loadedmetadata','canplay','play','playing','pause','waiting','stalled','error','encrypted','ended','abort','emptied']) {
         document.addEventListener(name,e=>{
           const m=e.target;if(!(m instanceof HTMLMediaElement))return;
@@ -176,6 +200,7 @@ async function createWindow() {
     {role:'editMenu'}, {role:'windowMenu'}
   ]));
   // Diagnostics must never gate navigation; CDP is opt-in after the page loads.
+  console.log('Session:',freshSession?'fresh-in-memory':'persistent');
   console.log('Loading Spotify (Chromium Media Trace off by default)...');
   await win.loadURL(home);
   console.log('Spotify document loaded.');
