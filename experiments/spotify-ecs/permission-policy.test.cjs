@@ -15,3 +15,16 @@ test('deny lookalike and insecure origins', () => {
   for (const raw of ['https://open.spotify.com.example.org','http://open.spotify.com','https://open.spotify.com:444'])
     assert.equal(drmAllowed('mediaKeySystem', origin, raw, true), false);
 });
+
+const {syncAllowed} = require('./permission-policy.cjs');
+test('allow trusted document and worker one-shot sync', () => {
+  assert.equal(syncAllowed('background-sync',origin,origin,false,true),true);
+  assert.equal(syncAllowed('background-sync',origin,null,true,undefined),true);
+});
+test('deny foreign, missing and periodic sync', () => {
+  assert.equal(syncAllowed('background-sync','https://example.com',origin,false,true),false);
+  assert.equal(syncAllowed('background-sync',undefined,null,true),false);
+  assert.equal(syncAllowed('periodic-background-sync',origin,origin,false,true),false);
+  assert.equal(syncAllowed('background-sync',origin,origin,false,false),false);
+  assert.equal(syncAllowed('background-sync',origin,null,true,undefined,'https://example.com'),false);
+});

@@ -1,7 +1,9 @@
 const { app, BrowserWindow, Menu, dialog, components } = require('electron');
 const path = require('node:path');
 const {openTest,closeTests} = require('./self-tests.cjs');
-const { trusted, drmAllowed } = require('./permission-policy.cjs');
+const { trusted, drmAllowed, syncAllowed } = require('./permission-policy.cjs');
+const {installMediaTrace}=require('./media-trace.cjs');
+let mediaTrace;
 
 // Independent persistent profile; never read Chrome, Phi or native app data.
 app.setPath('userData', path.join(app.getPath('appData'), 'MusicPlayer-ECS-Experiment'));
@@ -78,6 +80,17 @@ async function diagnostics() {
       };
     })()`);
     report.domMediaEvents = await win.webContents.executeJavaScriptInIsolatedWorld(1001,[{code:'globalThis.__ecsTrace ?? []'}]).catch(()=>[]);
+    report.serviceWorker = await win.webContents.executeJavaScript(`(async()=>{
+      if(!navigator.serviceWorker)return {available:false};
+      try{
+        const regs=await navigator.serviceWorker.getRegistrations();
+        return {available:true,controlled:!!navigator.serviceWorker.controller,
+          controllerState:navigator.serviceWorker.controller?.state??null,
+          registrations:regs.slice(0,12).map(r=>({active:r.active?.state??null,waiting:r.waiting?.state??null,installing:r.installing?.state??null,syncAvailable:!!r.sync})),
+          navigationType:performance.getEntriesByType('navigation')[0]?.type??null};
+      }catch(e){return {available:true,error:e.name};}
+    })()`).catch(()=>({available:false}));
+    report.chromiumMediaTrace=mediaTrace?.status()??'unavailable';
     report.components = componentVersions();
     report.runtime = { audible: win.webContents.isCurrentlyAudible(), muted: win.webContents.isAudioMuted() };
     report.trace = trace.slice();
@@ -96,16 +109,18 @@ async function createWindow() {
     return {action:'deny'};
   });
   wc.session.setPermissionRequestHandler((requestWC, permission, callback, details) => {
-    const grant = requestWC === wc && drmAllowed(permission, wc.getURL(),
-      details?.requestingUrl, details?.isMainFrame, details?.securityOrigin);
+    const grant = requestWC === wc && (drmAllowed(permission, wc.getURL(),
+      details?.requestingUrl, details?.isMainFrame, details?.securityOrigin) ||
+      syncAllowed(permission, details?.requestingUrl, wc.getURL(), false, details?.isMainFrame, details?.securityOrigin));
     record('permission-request', {permission: permissionLabel(permission), granted: grant, trustedRequester: trusted(details?.requestingUrl)});
     callback(grant);
   });
   wc.session.setPermissionCheckHandler((requestWC, permission, requestingOrigin, details) => {
-    const grant = requestWC === wc && drmAllowed(permission, wc.getURL(),
-      requestingOrigin, details?.isMainFrame, details?.securityOrigin) &&
-      (!details?.requestingUrl || trusted(details.requestingUrl));
-    record('permission-check', {permission: permissionLabel(permission), granted: grant, trustedRequester: trusted(requestingOrigin)});
+    const grant = (requestWC === wc || requestWC === null) &&
+      (!details?.requestingUrl || trusted(details.requestingUrl)) &&
+      ((requestWC === wc && drmAllowed(permission, wc.getURL(), requestingOrigin, details?.isMainFrame, details?.securityOrigin)) ||
+      syncAllowed(permission, requestingOrigin, wc.getURL(), requestWC === null, details?.isMainFrame, details?.securityOrigin));
+    record('permission-check', {permission: permissionLabel(permission), granted: grant, trustedRequester: trusted(requestingOrigin), workerContext: requestWC === null});
     return grant;
   });
   wc.on('did-finish-load', () => {
@@ -125,8 +140,18 @@ async function createWindow() {
   wc.on('media-started-playing', () => record('media-started'));
   wc.on('media-paused', () => record('media-paused'));
   wc.on('audio-state-changed', (_event, audible) => record('audio-state', {audible: typeof audible === 'boolean' ? audible : wc.isCurrentlyAudible()}));
-  wc.on('did-start-loading', () => record('navigation-start'));
-  wc.on('did-stop-loading', () => record('navigation-stop'));
+  wc.on('did-start-loading', () => record('loading-start'));
+  wc.on('did-stop-loading', () => record('loading-stop'));
+  // Electron navigation events have used both positional and details-object signatures.
+  const navDetails=(urlOrDetails,inPlace,main)=>typeof urlOrDetails==='object' && urlOrDetails!==null
+    ? {mainFrame:!!urlOrDetails.isMainFrame,inPage:!!(urlOrDetails.isInPlace??urlOrDetails.isSameDocument),trusted:trusted(urlOrDetails.url)}
+    : {mainFrame:!!main,inPage:!!inPlace,trusted:trusted(urlOrDetails)};
+  wc.on('did-start-navigation',(_e,u,inPlace,main)=>record('navigation-start',navDetails(u,inPlace,main)));
+  wc.on('did-redirect-navigation',(_e,u,inPlace,main)=>record('navigation-redirect',navDetails(u,inPlace,main)));
+  wc.on('did-navigate-in-page',(_e,u,main)=>record('navigation-in-page',navDetails(u,true,main)));
+  wc.on('did-frame-navigate',(_e,u,status,_statusText,main)=>record('navigation-commit',{...navDetails(u,false,main),status:Number.isInteger(status)?status:null}));
+  wc.on('did-fail-provisional-load',(_e,code,_desc,_url,main)=>record('navigation-failed',{code,mainFrame:!!main}));
+  mediaTrace=installMediaTrace(wc,record,trusted);
   wc.on('render-process-gone', () => record('renderer-gone'));
   wc.session.webRequest.onCompleted(details => {
     const kind = networkKind(details.url, details.resourceType);
@@ -146,10 +171,11 @@ async function createWindow() {
     {label:'Experiment',submenu:[
       {label:'Spotify Home',click:()=>win?.loadURL(home).catch(()=>{})},
       {role:'reload'}, {label:'Test Unencrypted Audio',click:()=>openTest('audio',record)}, {label:'Test Widevine (Castlabs Lab)',click:()=>openTest('drm',record)}, {label:'Reset Playback Trace',click:resetTrace}, {label:'Run Capability Diagnostics',accelerator:'CmdOrCtrl+Shift+D',click:diagnostics},
-      {role:'toggleDevTools'}
+      {label:'Enable Chromium Media Trace',click:()=>mediaTrace?.enable()}, {role:'toggleDevTools'}
     ]},
     {role:'editMenu'}, {role:'windowMenu'}
   ]));
+  await mediaTrace.enable();
   await win.loadURL(home);
 }
 app.whenReady().then(async () => {

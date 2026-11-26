@@ -8,4 +8,9 @@ function drmAllowed(permission, topURL, requester, isMainFrame, securityOrigin) 
     trusted(requester) && isMainFrame !== false &&
     (securityOrigin == null || trusted(securityOrigin));
 }
-module.exports = { trusted, drmAllowed };
+function syncAllowed(permission, requester, topURL, worker, isMainFrame, securityOrigin) {
+  return permission === 'background-sync' && trusted(requester) &&
+    (securityOrigin == null || trusted(securityOrigin)) &&
+    (worker === true || (trusted(topURL) && isMainFrame !== false));
+}
+module.exports = { trusted, drmAllowed, syncAllowed };
