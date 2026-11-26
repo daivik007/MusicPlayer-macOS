@@ -35,3 +35,7 @@ State includes stable track IDs, queue order, shuffle/repeat, last track and pos
 - Import at least four tracks, play the last library row, enable shuffle; all other playable tracks should become upcoming without restarting the current song.
 - Next and automatic advancement follow shuffled order, with no repeats within a cycle. Repeat all reshuffles at the boundary; repeat one repeats only on natural completion.
 - With no current song, enable shuffle then press Play to start the shuffled queue. Turn shuffle off to restore library order. Relaunch to verify queue persistence.
+
+## M4B ECS bridge (experiment branch)
+
+The Spotify web player runs in an independent Electron (Castlabs ECS) process, launched and supervised by `ECSRuntime` (a Swift actor in `MusicPlayer/ECS/`). They talk newline-delimited JSON over stdio (no sockets/HTTP); protocol and limits are in `experiments/spotify-ecs/README.md`. The bridge is headless and independent of `AudioEngine`/`LibraryManager`; local playback is unchanged. The App Sandbox must be disabled to launch the runtime in development builds.

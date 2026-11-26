@@ -4,6 +4,8 @@
 - [x] M2: Multi-file import, in-memory library, queue, previous/next, shuffle and repeat (user-tested and merged).
 - [ ] M3: Persistent library, security-scoped bookmarks, settings (implementation in review).
 - [ ] M4: Spotify OAuth/API feasibility and supported library access.
+  - [x] M4A: Spotify playback in an independent ECS runtime (clean User-Agent).
+  - [ ] M4B: SwiftUI-ECS stdio bridge (ping, runtime/auth/playback status, shutdown) - implemented, awaiting macOS testing.
 - [ ] M5: YouTube Music integration feasibility; official API limitations.
 - [ ] M6: Permissioned extension SDK and isolated runtime.
 - [ ] M7: Authorized remote FLAC playback and cache.
