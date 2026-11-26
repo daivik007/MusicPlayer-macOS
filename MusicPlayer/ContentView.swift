@@ -12,6 +12,13 @@ struct ContentView: View {
     
     var body: some View {
         VStack(spacing: 16) {
+            HStack {
+                Spacer()
+                ChromiumExperimentButton {
+                    audioEngine.pause()
+                    library.save(using: audioEngine)
+                }
+            }
             
             Group {
                 if let artwork = audioEngine.metadata.artwork {

@@ -2,8 +2,8 @@
 
 - [x] M1: Local playback, seeking, metadata and artwork (user-tested).
 - [x] M2: Multi-file import, in-memory library, queue, previous/next, shuffle and repeat (user-tested and merged).
-- [ ] M3: Persistent library, security-scoped bookmarks, settings (implementation in review).
-- [ ] M4: Spotify OAuth/API feasibility and supported library access.
+- [x] M3: Persistent library, security-scoped bookmarks, settings (user-tested and merged).
+- [ ] M4: Spotify feasibility — OAuth and WebKit branches retained; Chromium/CEF baseline experiment in review.
 - [ ] M5: YouTube Music integration feasibility; official API limitations.
 - [ ] M6: Permissioned extension SDK and isolated runtime.
 - [ ] M7: Authorized remote FLAC playback and cache.

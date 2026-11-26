@@ -35,3 +35,6 @@ State includes stable track IDs, queue order, shuffle/repeat, last track and pos
 - Import at least four tracks, play the last library row, enable shuffle; all other playable tracks should become upcoming without restarting the current song.
 - Next and automatic advancement follow shuffled order, with no repeats within a cycle. Repeat all reshuffles at the boundary; repeat one repeats only on natural completion.
 - With no current song, enable shuffle then press Play to start the shuffled queue. Turn shuffle off to restore library order. Relaunch to verify queue persistence.
+
+## M4 Chromium feasibility
+See CHROMIUM_EXPERIMENT.md. This branch adds an external Chrome launcher and a standalone CEF sample inspection/test harness, not embedded playback. The native player and storage are unchanged. No browser profiles or credentials are accessed, no CDM is distributed, and no sandbox or signing settings are changed. Native CEF integration is gated on actual playback and licensing/security feasibility.
