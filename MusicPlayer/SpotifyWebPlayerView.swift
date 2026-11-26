@@ -14,16 +14,22 @@ final class SpotifyWebSession: NSObject, ObservableObject, WKNavigationDelegate,
     @Published private(set) var errorMessage = ""
     @Published private(set) var clearing = false
 
+    @Published private(set) var report = "No report yet. Attempt playback, then run diagnostics."
+    @Published private(set) var diagnosing = false
     let webView: WKWebView
 
     override init() {
         let config = WKWebViewConfiguration()
         // Persistent WebKit storage is scoped to this app, not Safari.
         config.websiteDataStore = .default()
-        config.mediaTypesRequiringUserActionForPlayback = .all
+        // Spotify may start media asynchronously after the user clicks Play.
+        config.mediaTypesRequiringUserActionForPlayback = []
         config.preferences.javaScriptCanOpenWindowsAutomatically = false
         webView = WKWebView(frame: .zero, configuration: config)
         super.init()
+        #if DEBUG
+        if #available(macOS 13.3, *) { webView.isInspectable = true }
+        #endif
         webView.navigationDelegate = self
         webView.uiDelegate = self
         openHome()
@@ -130,6 +136,69 @@ final class SpotifyWebSession: NSObject, ObservableObject, WKNavigationDelegate,
         errorMessage = "Web page failed to load (\(nsError.domain), \(nsError.code)). Try Reload."
     }
 
+    func runDiagnostics() async {
+        guard !diagnosing, !clearing, webView.url?.host == "open.spotify.com" else {
+            report = "Open open.spotify.com and finish signing in before running diagnostics."
+            return
+        }
+        diagnosing = true
+        defer { diagnosing = false }
+        let script = """
+        const a = document.createElement('audio');
+        const result = {
+          secureContext: window.isSecureContext,
+          visibility: document.visibilityState,
+          userAgent: navigator.userAgent,
+          encryptedMediaAPI: typeof navigator.requestMediaKeySystemAccess === 'function',
+          mediaSource: typeof MediaSource !== 'undefined',
+          managedMediaSource: typeof ManagedMediaSource !== 'undefined',
+          webAudio: typeof AudioContext !== 'undefined' || typeof webkitAudioContext !== 'undefined',
+          aac: a.canPlayType('audio/mp4; codecs="mp4a.40.2"'),
+          opus: a.canPlayType('audio/webm; codecs="opus"'),
+          mp3: a.canPlayType('audio/mpeg'),
+          mediaElements: Array.from(document.querySelectorAll('audio, video')).slice(0, 12).map(m => ({
+            kind: m.tagName, paused: m.paused, muted: m.muted, volume: m.volume,
+            readyState: m.readyState, networkState: m.networkState,
+            currentTime: Number.isFinite(m.currentTime) ? Math.round(m.currentTime * 10) / 10 : null,
+            errorCode: m.error ? m.error.code : null,
+            hasMediaKeys: !!m.mediaKeys
+          }))
+        };
+        // Query only standard capability APIs. No license requests, media extraction,
+        // cookies, account details, URLs, or modification of the page.
+        if (result.encryptedMediaAPI) {
+          const cfg = [{ initDataTypes: ['cenc'], audioCapabilities: [
+            { contentType: 'audio/mp4; codecs="mp4a.40.2"' }
+          ], distinctiveIdentifier: 'not-allowed', persistentState: 'not-allowed',
+          sessionTypes: ['temporary'] }];
+          const probe = async (key, config) => {
+            try {
+              return await Promise.race([
+                navigator.requestMediaKeySystemAccess(key, config).then(() => 'accepted', e => e.name || 'rejected'),
+                new Promise(resolve => setTimeout(() => resolve('timed out'), 4000))
+              ]);
+            } catch (e) { return e.name || 'failed'; }
+          };
+          result.widevine = await probe('com.widevine.alpha', cfg);
+          result.fairPlay = await probe('com.apple.fps', [{
+            initDataTypes: ['sinf'],
+            audioCapabilities: [{ contentType: 'audio/mp4; codecs="mp4a.40.2"' }],
+            distinctiveIdentifier: 'not-allowed', persistentState: 'not-allowed',
+            sessionTypes: ['temporary']
+          }]);
+        }
+        return JSON.stringify(result, null, 2);
+        """
+        do {
+            let result = try await webView.callAsyncJavaScript(script, arguments: [:], in: nil, contentWorld: .page)
+            let payload = result as? String ?? "Unexpected JavaScript response."
+            report = "macOS: \(ProcessInfo.processInfo.operatingSystemVersionString)\nMedia gesture requirement: none (experimental)\n\n" + payload
+        } catch {
+            let ns = error as NSError
+            report = "Diagnostic script failed (\(ns.domain), \(ns.code)). Reload and retry."
+        }
+    }
+
     func clearSession() async {
         guard !clearing else { return }
         clearing = true
@@ -157,6 +226,7 @@ struct SpotifyWebContainer: NSViewRepresentable {
 struct SpotifyWebPlayerView: View {
     @StateObject private var session = SpotifyWebSession()
     @State private var confirmClear = false
+    @State private var showDiagnostics = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -178,6 +248,8 @@ struct SpotifyWebPlayerView: View {
                 Text(session.host).font(.caption).textSelection(.enabled)
                 if session.loading || session.clearing { ProgressView().controlSize(.small) }
                 Spacer()
+                Button("Diagnostics") { showDiagnostics = true; Task { await session.runDiagnostics() } }
+                    .disabled(session.clearing || session.diagnosing)
                 Button("Open in Browser") { NSWorkspace.shared.open(SpotifyWebSession.home) }
                 Button("Clear Session…") { confirmClear = true }
                     .disabled(session.clearing)
@@ -200,6 +272,29 @@ struct SpotifyWebPlayerView: View {
                 .padding(8)
         }
         .frame(minWidth: 760, minHeight: 560)
+        .sheet(isPresented: $showDiagnostics) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Playback diagnostics").font(.title2.bold())
+                Text("Capability probes are not proof of Spotify DRM compatibility. No account data or media URLs are collected.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if session.diagnosing { ProgressView("Checking media capabilities…") }
+                ScrollView {
+                    Text(session.report).font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                HStack {
+                    Button("Run Again") { Task { await session.runDiagnostics() } }
+                        .disabled(session.diagnosing)
+                    Button("Copy Report") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(session.report, forType: .string)
+                    }.disabled(session.diagnosing)
+                    Spacer()
+                    Button("Done") { showDiagnostics = false }
+                }
+            }.padding(20).frame(width: 660, height: 520)
+        }
         .confirmationDialog("Clear Spotify browser session?", isPresented: $confirmClear) {
             Button("Clear Session", role: .destructive) {
                 Task { await session.clearSession() }
