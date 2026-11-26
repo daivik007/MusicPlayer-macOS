@@ -6,12 +6,23 @@ import Combine
 
 struct ContentView: View {
     
+    @Environment(\.openWindow) private var openWindow
     @StateObject private var audioEngine = AudioEngine()
     @StateObject private var library = LibraryManager()
     private let autosave = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
     
     var body: some View {
         VStack(spacing: 16) {
+            HStack {
+                Spacer()
+                Button {
+                    audioEngine.pause()
+                    library.save(using: audioEngine)
+                    openWindow(id: "spotify-web")
+                } label: {
+                    Label("Spotify Web Player", systemImage: "globe")
+                }
+            }
             
             Group {
                 if let artwork = audioEngine.metadata.artwork {

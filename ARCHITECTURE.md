@@ -35,3 +35,6 @@ State includes stable track IDs, queue order, shuffle/repeat, last track and pos
 - Import at least four tracks, play the last library row, enable shuffle; all other playable tracks should become upcoming without restarting the current song.
 - Next and automatic advancement follow shuffled order, with no repeats within a cycle. Repeat all reshuffles at the boundary; repeat one repeats only on natural completion.
 - With no current song, enable shuffle then press Play to start the shuffled queue. Turn shuffle off to restore library order. Relaunch to verify queue persistence.
+
+## M4 WebKit experiment
+The experiment uses a separate visible Spotify window, WKWebView with persistent application-scoped website data and outgoing networking only. Main-frame navigation is limited to HTTPS Spotify hosts; external user-clicked links may open in the system browser. Some federated login flows may not work. Spotify itself handles credentials and playback; the app does not inject scripts, inspect session tokens, modify ads, or access private APIs. Opening the window from the local player pauses local playback; there is not yet a global playback coordinator. Closing the window unloads its web page. See SPOTIFY_WEBPLAYER_EXPERIMENT.md for tests and limitations.
