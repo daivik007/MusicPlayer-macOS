@@ -7,6 +7,9 @@ const {installWorkerTrace}=require('./worker-trace.cjs');
 const freshSession=process.argv.includes('--fresh-session');
 const partition=freshSession?'spotify-ecs-fresh-'+require('node:crypto').randomUUID():'persist:spotify-ecs';
 let mediaTrace;
+// One-variable experiment: --clean-ua replaces Electron's UA (app name + Electron token) with the plain Chromium UA that Phi sends. Nothing else changes.
+const cleanUA=process.argv.includes('--clean-ua');
+const cleanUserAgent=`Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${process.versions.chrome.split('.')[0]}.0.0.0 Safari/537.36`;
 
 // Independent persistent profile; never read Chrome, Phi or native app data.
 app.setPath('userData', path.join(app.getPath('appData'), 'MusicPlayer-ECS-Experiment'));
@@ -93,6 +96,7 @@ async function diagnostics() {
     })()`);
     report.domMediaEvents = await win.webContents.executeJavaScriptInIsolatedWorld(1001,[{code:'globalThis.__ecsTrace ?? []'}]).catch(()=>[]);
     report.sessionMode = freshSession ? 'fresh-in-memory' : 'persistent';
+    report.uaMode = cleanUA ? 'clean-chromium' : 'electron-default';
     report.serviceWorker = await win.webContents.executeJavaScript(`(async()=>{
       if(!navigator.serviceWorker)return {available:false};
       try{
@@ -116,6 +120,7 @@ async function createWindow() {
   win = new BrowserWindow({width:1100,height:760,title:freshSession?'MusicPlayer ECS — Fresh session':'MusicPlayer ECS experiment',
     webPreferences:{nodeIntegration:false,contextIsolation:true,sandbox:true,webSecurity:true,partition}});
   const wc = win.webContents;
+  if (cleanUA) { wc.session.setUserAgent(cleanUserAgent); wc.setUserAgent(cleanUserAgent); } // session covers workers, wc covers this page
   installWorkerTrace(wc.session,record,trusted);
   wc.on('will-navigate', (e,url) => { if (!allowed(url)) e.preventDefault(); });
   wc.on('will-redirect', (e,url) => { if (!allowed(url)) e.preventDefault(); });
@@ -201,6 +206,7 @@ async function createWindow() {
   ]));
   // Diagnostics must never gate navigation; CDP is opt-in after the page loads.
   console.log('Session:',freshSession?'fresh-in-memory':'persistent');
+  console.log('UA mode:',cleanUA?'clean-chromium':'electron-default');
   console.log('Loading Spotify (Chromium Media Trace off by default)...');
   await win.loadURL(home);
   console.log('Spotify document loaded.');

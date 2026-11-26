@@ -6,7 +6,9 @@
   "scripts": {
     "start": "electron .",
     "check": "node --check main.cjs && node --check worker-trace.cjs && node --check media-trace.cjs && node --check self-tests.cjs && node --check audio-test.js && node --test permission-policy.test.cjs",
-    "start:fresh": "electron . --fresh-session"
+    "start:fresh": "electron . --fresh-session",
+    "start:clean-ua": "electron . --clean-ua",
+    "start:fresh-clean-ua": "electron . --fresh-session --clean-ua"
   },
   "devDependencies": {
     "electron": "https://github.com/castlabs/electron-releases#v45.2.1+wvcus"
