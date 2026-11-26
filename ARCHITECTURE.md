@@ -35,3 +35,6 @@ State includes stable track IDs, queue order, shuffle/repeat, last track and pos
 - Import at least four tracks, play the last library row, enable shuffle; all other playable tracks should become upcoming without restarting the current song.
 - Next and automatic advancement follow shuffled order, with no repeats within a cycle. Repeat all reshuffles at the boundary; repeat one repeats only on natural completion.
 - With no current song, enable shuffle then press Play to start the shuffled queue. Turn shuffle off to restore library order. Relaunch to verify queue persistence.
+
+## M4 Spotify proof of concept
+See SPOTIFY_RESEARCH.md for source research, setup, limitations and acceptance checks. The provider is isolated from local playback and uses read-only public APIs. Settings owns the account view; Keychain stores the token, UserDefaults stores only the public client ID. Loopback listener requires sandbox network server/client permissions.
