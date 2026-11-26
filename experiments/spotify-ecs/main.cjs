@@ -1,5 +1,6 @@
 const { app, BrowserWindow, Menu, dialog, components } = require('electron');
 const path = require('node:path');
+const {openTest,closeTests} = require('./self-tests.cjs');
 const { trusted, drmAllowed } = require('./permission-policy.cjs');
 
 // Independent persistent profile; never read Chrome, Phi or native app data.
@@ -12,8 +13,17 @@ function record(event, details = {}) {
   trace.push({ms: Date.now() - started, event, ...details});
   if (trace.length > 180) trace.shift();
 }
-function resetTrace() { trace.length = 0; started = Date.now(); record('reset'); }
-function permissionLabel(p) { return p === 'mediaKeySystem' ? p : 'other'; }
+function resetTrace() { trace.length = 0; started = Date.now(); record('reset'); if(win && !win.isDestroyed() && trusted(win.webContents.getURL())) win.webContents.executeJavaScriptInIsolatedWorld(1001,[{code:'if(globalThis.__ecsTrace) globalThis.__ecsTrace.length=0'}]).catch(()=>{}); }
+function permissionLabel(p) { return typeof p==='string' && /^[A-Za-z][A-Za-z0-9-]{0,63}$/.test(p) ? p : 'unknown'; }
+function componentVersions() {
+  try {
+    const states=components.status();
+    return Object.entries(states ?? {}).map(([id,value])=>({
+      id: /^[a-z0-9_-]{1,64}$/i.test(id)?id:'unknown',
+      version: [value?.version,value?.installedVersion,value?.currentVersion].find(v=>typeof v==='string' && /^\\d+(\\.\\d+){1,5}$/.test(v)) ?? 'not reported'
+    }));
+  } catch { return []; }
+}
 function networkKind(raw, type) {
   try {
     const u = new URL(raw);
@@ -67,6 +77,8 @@ async function diagnostics() {
         }))
       };
     })()`);
+    report.domMediaEvents = await win.webContents.executeJavaScriptInIsolatedWorld(1001,[{code:'globalThis.__ecsTrace ?? []'}]).catch(()=>[]);
+    report.components = componentVersions();
     report.runtime = { audible: win.webContents.isCurrentlyAudible(), muted: win.webContents.isAudioMuted() };
     report.trace = trace.slice();
     console.log('Capability report:', JSON.stringify(report, null, 2));
@@ -96,6 +108,20 @@ async function createWindow() {
     record('permission-check', {permission: permissionLabel(permission), granted: grant, trustedRequester: trusted(requestingOrigin)});
     return grant;
   });
+  wc.on('did-finish-load', () => {
+    if (!trusted(wc.getURL())) return;
+    wc.executeJavaScriptInIsolatedWorld(1001,[{code:`(() => {
+      if(globalThis.__ecsTrace) return;
+      const events=[];globalThis.__ecsTrace=events;
+      for(const name of ['loadstart','loadedmetadata','canplay','play','playing','pause','waiting','stalled','error','encrypted','ended','abort','emptied']) {
+        document.addEventListener(name,e=>{
+          const m=e.target;if(!(m instanceof HTMLMediaElement))return;
+          events.push({event:name,time:Math.round(m.currentTime*10)/10,readyState:m.readyState,networkState:m.networkState,errorCode:m.error?.code??null});
+          if(events.length>80)events.shift();
+        },true);
+      }
+    })()`}]).catch(()=>{});
+  });
   wc.on('media-started-playing', () => record('media-started'));
   wc.on('media-paused', () => record('media-paused'));
   wc.on('audio-state-changed', (_event, audible) => record('audio-state', {audible: typeof audible === 'boolean' ? audible : wc.isCurrentlyAudible()}));
@@ -114,12 +140,12 @@ async function createWindow() {
   wc.on('did-fail-load', (_e,code,_description,_url,isMainFrame) => {
     if (isMainFrame && code !== -3) console.log('Main frame load failed:',code);
   });
-  win.on('closed', () => { win = null; });
+  win.on('closed', () => { win = null; closeTests(); });
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     {label:'MusicPlayer ECS',submenu:[{role:'quit'}]},
     {label:'Experiment',submenu:[
       {label:'Spotify Home',click:()=>win?.loadURL(home).catch(()=>{})},
-      {role:'reload'}, {label:'Reset Playback Trace',click:resetTrace}, {label:'Run Capability Diagnostics',accelerator:'CmdOrCtrl+Shift+D',click:diagnostics},
+      {role:'reload'}, {label:'Test Unencrypted Audio',click:()=>openTest('audio',record)}, {label:'Test Widevine (Castlabs Lab)',click:()=>openTest('drm',record)}, {label:'Reset Playback Trace',click:resetTrace}, {label:'Run Capability Diagnostics',accelerator:'CmdOrCtrl+Shift+D',click:diagnostics},
       {role:'toggleDevTools'}
     ]},
     {role:'editMenu'}, {role:'windowMenu'}
@@ -132,6 +158,7 @@ app.whenReady().then(async () => {
   console.log('Waiting for Widevine component initialization...');
   await components.whenReady();
   console.log('Components ready (not proof of license or playback).');
+  console.log('Component versions:', JSON.stringify(componentVersions()));
   await createWindow();
 }).catch(error => {
   console.error('Startup failed:', error.message);
