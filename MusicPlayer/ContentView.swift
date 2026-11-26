@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 struct ContentView: View {
     
     @StateObject private var audioEngine = AudioEngine()
+    @StateObject private var library = LibraryManager()
     
     var body: some View {
         VStack(spacing: 24) {
@@ -81,8 +82,51 @@ struct ContentView: View {
             }
 
             
-            Button("Open Audio File") {
-                openFile()
+            HStack {
+                Button("Import Music") { openFile() }
+                    .disabled(library.isImporting)
+                Spacer()
+                Text("\(library.tracks.count) songs")
+                    .foregroundStyle(.secondary)
+                if library.isImporting { ProgressView().controlSize(.small) }
+            }
+            if !library.importError.isEmpty {
+                Text(library.importError).font(.caption).foregroundStyle(.red)
+            }
+            List(library.tracks) { track in
+                Button {
+                    library.select(track, using: audioEngine)
+                } label: {
+                    HStack {
+                        if let art = track.metadata.artwork {
+                            Image(nsImage: art).resizable().scaledToFill()
+                                .frame(width: 36, height: 36).clipped()
+                        } else {
+                            Image(systemName: "music.note").frame(width: 36, height: 36)
+                        }
+                        VStack(alignment: .leading) {
+                            Text(track.metadata.title).lineLimit(1)
+                            Text(track.metadata.artist).font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        if library.currentID == track.id {
+                            Image(systemName: audioEngine.isPlaying ? "speaker.wave.2.fill" : "speaker.fill")
+                                .foregroundStyle(Color.accentColor)
+                        }
+                        Text(track.metadata.format).font(.caption).foregroundStyle(.secondary)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            .frame(minHeight: 120, idealHeight: 180)
+            if !library.upNext.isEmpty {
+                HStack {
+                    Text("Up Next").font(.caption).bold()
+                    Spacer()
+                    Text(library.upNext.map { $0.metadata.title }.joined(separator: " · "))
+                        .font(.caption).lineLimit(1).foregroundStyle(.secondary)
+                }
             }
             
             VStack(spacing: 8) {
@@ -108,23 +152,49 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
             }
             
-            Button {
-                audioEngine.togglePlayback()
-            } label: {
-                Image(systemName: audioEngine.isPlaying
-                      ? "pause.fill" : "play.fill")
-                    .font(.system(size: 28))
+            HStack(spacing: 24) {
+                Button { library.toggleShuffle() } label: {
+                    Image(systemName: "shuffle")
+                        .foregroundStyle(library.shuffle ? Color.accentColor : Color.secondary)
+                }
+                .help("Shuffle")
+                Button { library.previous(using: audioEngine) } label: {
+                    Image(systemName: "backward.fill")
+                }
+                .disabled(library.currentID == nil)
+                .help("Previous")
+                Button { audioEngine.togglePlayback() } label: {
+                    Image(systemName: audioEngine.isPlaying ? "pause.fill" : "play.fill")
+                        .font(.system(size: 28))
+                }
+                .disabled(audioEngine.duration == 0)
+                .help("Play or pause")
+                Button { library.next(using: audioEngine) } label: {
+                    Image(systemName: "forward.fill")
+                }
+                .disabled(!library.canGoNext)
+                .help("Next")
+                Button { library.cycleRepeat() } label: {
+                    Image(systemName: library.repeatMode == .one ? "repeat.1" : "repeat")
+                        .foregroundStyle(library.repeatMode == .off ? Color.secondary : Color.accentColor)
+                }
+                .help("Repeat: \(library.repeatMode.rawValue)")
             }
             .buttonStyle(.plain)
-            .disabled(audioEngine.duration == 0)
             
             if !audioEngine.errorMessage.isEmpty {
                 Text(audioEngine.errorMessage)
                     .foregroundStyle(.red)
             }
         }
-        .padding(40)
-        .frame(minWidth: 500, minHeight: 600)
+        .padding(24)
+        .frame(minWidth: 540, minHeight: 640)
+        .onAppear {
+            audioEngine.onFinished = { [weak library, weak audioEngine] in
+                guard let library, let audioEngine else { return }
+                library.finished(using: audioEngine)
+            }
+        }
     }
     
     private func formatTime(_ time: Double) -> String {
@@ -141,12 +211,12 @@ struct ContentView: View {
         let panel = NSOpenPanel()
         
         panel.allowedContentTypes = [.audio]
-        panel.allowsMultipleSelection = false
+        panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
         
-        if panel.runModal() == .OK,
-           let url = panel.url {
-            audioEngine.loadAudio(url: url)
+        if panel.runModal() == .OK {
+            let urls = panel.urls
+            Task { await library.importFiles(urls) }
         }
     }
 }
