@@ -152,7 +152,7 @@ async function createWindow() {
   wc.on('did-frame-navigate',(_e,u,status,_statusText,main)=>record('navigation-commit',{...navDetails(u,false,main),status:Number.isInteger(status)?status:null}));
   wc.on('did-fail-provisional-load',(_e,code,_desc,_url,main)=>record('navigation-failed',{code,mainFrame:!!main}));
   mediaTrace=installMediaTrace(wc,record,trusted);
-  wc.on('render-process-gone', () => record('renderer-gone'));
+  wc.on('render-process-gone', (_e,details) => { record('renderer-gone'); console.log('Renderer exited:',details.reason,details.exitCode); });
   wc.session.webRequest.onCompleted(details => {
     const kind = networkKind(details.url, details.resourceType);
     if (kind && (kind === 'possible-license' || kind === 'media' || details.statusCode >= 400))
@@ -171,12 +171,14 @@ async function createWindow() {
     {label:'Experiment',submenu:[
       {label:'Spotify Home',click:()=>win?.loadURL(home).catch(()=>{})},
       {role:'reload'}, {label:'Test Unencrypted Audio',click:()=>openTest('audio',record)}, {label:'Test Widevine (Castlabs Lab)',click:()=>openTest('drm',record)}, {label:'Reset Playback Trace',click:resetTrace}, {label:'Run Capability Diagnostics',accelerator:'CmdOrCtrl+Shift+D',click:diagnostics},
-      {label:'Enable Chromium Media Trace',click:()=>mediaTrace?.enable()}, {role:'toggleDevTools'}
+      {label:'Enable Chromium Media Trace',click:()=>mediaTrace?.enable()}, {label:'Disable Chromium Media Trace',click:()=>mediaTrace?.disable()}, {role:'toggleDevTools'}
     ]},
     {role:'editMenu'}, {role:'windowMenu'}
   ]));
-  await mediaTrace.enable();
+  // Diagnostics must never gate navigation; CDP is opt-in after the page loads.
+  console.log('Loading Spotify (Chromium Media Trace off by default)...');
   await win.loadURL(home);
+  console.log('Spotify document loaded.');
 }
 app.whenReady().then(async () => {
   console.log('Runtime:', process.platform, process.arch, process.versions.electron, process.versions.chrome);

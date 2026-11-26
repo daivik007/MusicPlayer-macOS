@@ -22,10 +22,16 @@ function installMediaTrace(wc, record, trusted) {
   async function enable(){
     try{
       if(!wc.debugger.isAttached())wc.debugger.attach('1.3');
-      await wc.debugger.sendCommand('Media.enable');
+      let timer;
+      try {await Promise.race([wc.debugger.sendCommand('Media.enable'),new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('timeout')),5000);})]);}
+      finally {clearTimeout(timer);}
       state='enabled';record('cdp-enabled');
-    }catch{state='unavailable';record('cdp-unavailable');}
+    }catch{disable();state='unavailable';record('cdp-unavailable');}
   }
-  return {enable,status:()=>state};
+  function disable(){
+    try {if(wc.debugger.isAttached())wc.debugger.detach();}catch{}
+    state='disabled';record('cdp-disabled');
+  }
+  return {enable,disable,status:()=>state};
 }
 module.exports={installMediaTrace};
