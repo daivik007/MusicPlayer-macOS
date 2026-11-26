@@ -11,7 +11,7 @@ struct ContentView: View {
     private let autosave = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
     
     var body: some View {
-        VStack(spacing: 24) {
+        VStack(spacing: 16) {
             
             Group {
                 if let artwork = audioEngine.metadata.artwork {
@@ -137,10 +137,10 @@ struct ContentView: View {
                     .disabled(library.isImporting || library.isRestoring)
                 }
             }
-            .frame(minHeight: 120, idealHeight: 180)
+            .frame(minHeight: 140, idealHeight: 220)
             if !library.upNext.isEmpty {
                 HStack {
-                    Text("Up Next").font(.caption).bold()
+                    Text(library.shuffle ? "Up Next · Shuffled" : "Up Next").font(.caption).bold()
                     Spacer()
                     Text(library.upNext.map { $0.metadata.title }.joined(separator: " · "))
                         .font(.caption).lineLimit(1).foregroundStyle(.secondary)
@@ -178,17 +178,18 @@ struct ContentView: View {
                     Image(systemName: "shuffle")
                         .foregroundStyle(library.shuffle ? Color.accentColor : Color.secondary)
                 }
-                .help("Shuffle")
+                .help(library.shuffle ? "Shuffle on" : "Shuffle off")
+                .disabled(library.isRestoring)
                 Button { library.previous(using: audioEngine); library.save(using: audioEngine) } label: {
                     Image(systemName: "backward.fill")
                 }
                 .disabled(library.currentID == nil)
                 .help("Previous")
-                Button { audioEngine.togglePlayback(); library.save(using: audioEngine) } label: {
+                Button { library.playOrPause(using: audioEngine); library.save(using: audioEngine) } label: {
                     Image(systemName: audioEngine.isPlaying ? "pause.fill" : "play.fill")
                         .font(.system(size: 28))
                 }
-                .disabled(audioEngine.duration == 0)
+                .disabled(library.isRestoring || (audioEngine.duration == 0 && (library.currentID != nil || !library.tracks.contains { $0.available })))
                 .help("Play or pause")
                 Button { library.next(using: audioEngine) } label: {
                     Image(systemName: "forward.fill")
@@ -209,7 +210,7 @@ struct ContentView: View {
             }
         }
         .padding(24)
-        .frame(minWidth: 540, minHeight: 640)
+        .frame(minWidth: 540, idealWidth: 640, minHeight: 700, idealHeight: 850)
         .onAppear {
             audioEngine.onFinished = { [weak library, weak audioEngine] in
                 guard let library, let audioEngine else { return }

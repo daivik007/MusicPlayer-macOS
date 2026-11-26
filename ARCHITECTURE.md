@@ -29,3 +29,9 @@ State includes stable track IDs, queue order, shuffle/repeat, last track and pos
 - Test a forced quit after a checkpoint; verify last saved position is restored approximately.
 - Verify the app opens one main window and does not unexpectedly autoplay.
 - Native build, signing, bookmark behavior and playback require local macOS validation.
+
+### M3 feedback regression checks
+- Launch the main window; default size is 640 × 850 points, with macOS allowed to constrain or restore window size.
+- Import at least four tracks, play the last library row, enable shuffle; all other playable tracks should become upcoming without restarting the current song.
+- Next and automatic advancement follow shuffled order, with no repeats within a cycle. Repeat all reshuffles at the boundary; repeat one repeats only on natural completion.
+- With no current song, enable shuffle then press Play to start the shuffled queue. Turn shuffle off to restore library order. Relaunch to verify queue persistence.

@@ -62,7 +62,7 @@ final class LibraryManager: ObservableObject {
 
     func select(_ track: Track, using engine: AudioEngine) {
         if shuffle {
-            queue = [track] + tracks.filter { $0.id != track.id }.shuffled()
+            queue = [track] + shuffledTracks(tracks.filter { $0.id != track.id })
         } else {
             queue = tracks
         }
@@ -84,8 +84,18 @@ final class LibraryManager: ObservableObject {
         guard let index else { return }
         if let next = queue.dropFirst(index + 1).first(where: { $0.available }) {
             start(next, using: engine)
-        } else if repeatMode == .all, let first = queue.first(where: { $0.available }) {
-            start(first, using: engine)
+        } else if repeatMode == .all {
+            if shuffle {
+                let playable = tracks.filter { $0.available }
+                var order = shuffledTracks(playable)
+                if order.count > 1, order.first?.id == currentID {
+                    order.swapAt(0, 1)
+                }
+                queue = order + tracks.filter { !$0.available }
+            }
+            if let first = queue.first(where: { $0.available }) {
+                start(first, using: engine)
+            }
         }
     }
 
@@ -109,15 +119,39 @@ final class LibraryManager: ObservableObject {
         }
     }
 
+    // Guarantee a visible change when at least two candidates exist.
+    private func shuffledTracks(_ input: [Track]) -> [Track] {
+        var result = input.shuffled()
+        if result.count > 1, result.map(\.id) == input.map(\.id) {
+            result.swapAt(0, 1)
+        }
+        return result
+    }
+
     func toggleShuffle() {
+        guard !isRestoring else { return }
         shuffle.toggle()
-        if shuffle, let index {
-            let prefix = Array(queue.prefix(index + 1))
-            queue = prefix + Array(queue.dropFirst(index + 1)).shuffled()
-        } else if shuffle {
-            queue = tracks.shuffled()
+        if shuffle {
+            // Start a new shuffled cycle anchored at the currently playing song.
+            // Include songs before it in library order, not just the old suffix.
+            if let current = tracks.first(where: { $0.id == currentID }) {
+                let others = tracks.filter { $0.id != current.id }
+                queue = [current] + shuffledTracks(others.filter { $0.available })
+                    + others.filter { !$0.available }
+            } else {
+                queue = shuffledTracks(tracks.filter { $0.available })
+                    + tracks.filter { !$0.available }
+            }
         } else {
             queue = tracks
+        }
+    }
+
+    func playOrPause(using engine: AudioEngine) {
+        if engine.duration > 0 {
+            engine.togglePlayback()
+        } else if currentID == nil, let first = queue.first(where: { $0.available }) {
+            start(first, using: engine)
         }
     }
 
