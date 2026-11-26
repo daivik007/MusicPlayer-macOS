@@ -16,6 +16,8 @@ final class SpotifyWebSession: NSObject, ObservableObject, WKNavigationDelegate,
 
     @Published private(set) var report = "No report yet. Attempt playback, then run diagnostics."
     @Published private(set) var diagnosing = false
+    private let traceReceiver = SpotifyTraceReceiver()
+    private var trace: [String] = []
     let webView: WKWebView
 
     override init() {
@@ -25,14 +27,28 @@ final class SpotifyWebSession: NSObject, ObservableObject, WKNavigationDelegate,
         // Spotify may start media asynchronously after the user clicks Play.
         config.mediaTypesRequiringUserActionForPlayback = []
         config.preferences.javaScriptCanOpenWindowsAutomatically = false
+        config.userContentController.addUserScript(WKUserScript(source: SpotifyMediaTrace.source,
+            injectionTime: .atDocumentStart, forMainFrameOnly: false, in: SpotifyMediaTrace.world))
         webView = WKWebView(frame: .zero, configuration: config)
         super.init()
+        traceReceiver.session = self
+        config.userContentController.add(traceReceiver, contentWorld: SpotifyMediaTrace.world, name: "musicPlayerTrace")
         #if DEBUG
         if #available(macOS 13.3, *) { webView.isInspectable = true }
         #endif
         webView.navigationDelegate = self
         webView.uiDelegate = self
         openHome()
+    }
+
+    func appendTrace(_ event: String) {
+        trace.append(event)
+        if trace.count > 120 { trace.removeFirst(trace.count - 120) }
+    }
+
+    func resetTrace() {
+        trace.removeAll()
+        appendTrace("Trace reset; attempt playback now.")
     }
 
     func openHome() {
@@ -150,6 +166,10 @@ final class SpotifyWebSession: NSObject, ObservableObject, WKNavigationDelegate,
           visibility: document.visibilityState,
           userAgent: navigator.userAgent,
           encryptedMediaAPI: typeof navigator.requestMediaKeySystemAccess === 'function',
+          legacyFairPlay: typeof WebKitMediaKeys !== 'undefined' ?
+            (() => { try { return WebKitMediaKeys.isTypeSupported('com.apple.fps.1_0', 'audio/mp4'); }
+              catch (_) { return false; } })() : false,
+          frameCount: document.querySelectorAll('iframe').length,
           mediaSource: typeof MediaSource !== 'undefined',
           managedMediaSource: typeof ManagedMediaSource !== 'undefined',
           webAudio: typeof AudioContext !== 'undefined' || typeof webkitAudioContext !== 'undefined',
@@ -179,6 +199,12 @@ final class SpotifyWebSession: NSObject, ObservableObject, WKNavigationDelegate,
               ]);
             } catch (e) { return e.name || 'failed'; }
           };
+          result.fairPlayLegacyEME = await probe('com.apple.fps.1_0', [{
+            initDataTypes: ['sinf'],
+            audioCapabilities: [{ contentType: 'audio/mp4; codecs="mp4a.40.2"' }],
+            distinctiveIdentifier: 'not-allowed', persistentState: 'not-allowed',
+            sessionTypes: ['temporary']
+          }]);
           result.widevine = await probe('com.widevine.alpha', cfg);
           result.fairPlay = await probe('com.apple.fps', [{
             initDataTypes: ['sinf'],
@@ -192,7 +218,7 @@ final class SpotifyWebSession: NSObject, ObservableObject, WKNavigationDelegate,
         do {
             let result = try await webView.callAsyncJavaScript(script, arguments: [:], in: nil, contentWorld: .page)
             let payload = result as? String ?? "Unexpected JavaScript response."
-            report = "macOS: \(ProcessInfo.processInfo.operatingSystemVersionString)\nMedia gesture requirement: none (experimental)\n\n" + payload
+            report = "macOS: \(ProcessInfo.processInfo.operatingSystemVersionString)\nMedia gesture requirement: none (experimental)\n\n" + payload + "\n\nObserved events (latest 120):\n" + (trace.isEmpty ? "None" : trace.joined(separator: "\n"))
         } catch {
             let ns = error as NSError
             report = "Diagnostic script failed (\(ns.domain), \(ns.code)). Reload and retry."
@@ -248,6 +274,7 @@ struct SpotifyWebPlayerView: View {
                 Text(session.host).font(.caption).textSelection(.enabled)
                 if session.loading || session.clearing { ProgressView().controlSize(.small) }
                 Spacer()
+                Button("Reset Trace") { session.resetTrace() }.help("Clear event history before trying Play")
                 Button("Diagnostics") { showDiagnostics = true; Task { await session.runDiagnostics() } }
                     .disabled(session.clearing || session.diagnosing)
                 Button("Open in Browser") { NSWorkspace.shared.open(SpotifyWebSession.home) }
@@ -271,7 +298,7 @@ struct SpotifyWebPlayerView: View {
                 .foregroundStyle(.secondary)
                 .padding(8)
         }
-        .frame(minWidth: 760, minHeight: 560)
+        .frame(minWidth: 900, minHeight: 560)
         .sheet(isPresented: $showDiagnostics) {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Playback diagnostics").font(.title2.bold())
