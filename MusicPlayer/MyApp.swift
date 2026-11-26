@@ -6,5 +6,8 @@ import SwiftUI
             ContentView()
         }
         .defaultSize(width: 640, height: 850)
+        Settings {
+            SpotifyAccountView()
+        }
     }
 }
