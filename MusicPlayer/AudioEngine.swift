@@ -7,6 +7,7 @@ class AudioEngine: NSObject, ObservableObject, AVAudioPlayerDelegate {
     
     private var player: AVAudioPlayer?
     private var timer: Timer?
+    private var scopedURL: URL?
     var onFinished: (() -> Void)?
     
     @Published var isPlaying = false
@@ -20,12 +21,15 @@ class AudioEngine: NSObject, ObservableObject, AVAudioPlayerDelegate {
 
     
     @discardableResult
-    func loadAudio(url: URL, cachedMetadata: TrackMetadata? = nil) -> Bool {
+    func loadAudio(url: URL, cachedMetadata: TrackMetadata? = nil, autoplay: Bool = true) -> Bool {
         metadataTask?.cancel()
         metadata = cachedMetadata ?? TrackMetadata()
         metadata.title = url.deletingPathExtension().lastPathComponent
         do {
             player?.stop()
+            player = nil
+            releaseFileAccess()
+            if url.startAccessingSecurityScopedResource() { scopedURL = url }
             timer?.invalidate()
             
             isPlaying = false
@@ -56,16 +60,41 @@ class AudioEngine: NSObject, ObservableObject, AVAudioPlayerDelegate {
             }
             }
 
-            play()
-            return isPlaying
+            if autoplay {
+                play()
+                if !isPlaying { errorMessage = "Could not start playback." }
+                return isPlaying
+            }
+            return true
             
         } catch {
             player = nil
+            releaseFileAccess()
+            trackName = metadata.title
             errorMessage = error.localizedDescription
             return false
         }
     }
     
+    private func releaseFileAccess() {
+        scopedURL?.stopAccessingSecurityScopedResource()
+        scopedURL = nil
+    }
+
+    func clear() {
+        metadataTask?.cancel()
+        timer?.invalidate()
+        player?.stop()
+        player = nil
+        releaseFileAccess()
+        isPlaying = false
+        currentTime = 0
+        duration = 0
+        metadata = TrackMetadata()
+        trackName = "No track selected"
+        errorMessage = ""
+    }
+
     func play() {
         if currentTime >= duration {
             player?.currentTime = 0
@@ -124,5 +153,6 @@ class AudioEngine: NSObject, ObservableObject, AVAudioPlayerDelegate {
     
     deinit {
         timer?.invalidate()
+        scopedURL?.stopAccessingSecurityScopedResource()
     }
 }

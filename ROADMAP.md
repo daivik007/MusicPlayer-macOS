@@ -1,8 +1,8 @@
 # Development roadmap
 
 - [x] M1: Local playback, seeking, metadata and artwork (user-tested).
-- [ ] M2: Multi-file import, in-memory library, queue, previous/next, shuffle and repeat (implementation in review).
-- [ ] M3: Persistent library, security-scoped bookmarks, settings.
+- [x] M2: Multi-file import, in-memory library, queue, previous/next, shuffle and repeat (user-tested and merged).
+- [ ] M3: Persistent library, security-scoped bookmarks, settings (implementation in review).
 - [ ] M4: Spotify OAuth/API feasibility and supported library access.
 - [ ] M5: YouTube Music integration feasibility; official API limitations.
 - [ ] M6: Permissioned extension SDK and isolated runtime.
