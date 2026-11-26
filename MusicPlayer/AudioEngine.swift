@@ -7,6 +7,7 @@ class AudioEngine: NSObject, ObservableObject, AVAudioPlayerDelegate {
     
     private var player: AVAudioPlayer?
     private var timer: Timer?
+    var onFinished: (() -> Void)?
     
     @Published var isPlaying = false
     @Published var trackName = "No track selected"
@@ -18,9 +19,10 @@ class AudioEngine: NSObject, ObservableObject, AVAudioPlayerDelegate {
     private var metadataTask: Task<Void, Never>?
 
     
-    func loadAudio(url: URL) {
+    @discardableResult
+    func loadAudio(url: URL, cachedMetadata: TrackMetadata? = nil) -> Bool {
         metadataTask?.cancel()
-        metadata = TrackMetadata()
+        metadata = cachedMetadata ?? TrackMetadata()
         metadata.title = url.deletingPathExtension().lastPathComponent
         do {
             player?.stop()
@@ -40,6 +42,10 @@ class AudioEngine: NSObject, ObservableObject, AVAudioPlayerDelegate {
             duration = player?.duration ?? 0
             errorMessage = ""
             
+            if let cachedMetadata {
+                metadata = cachedMetadata
+                trackName = cachedMetadata.title
+            } else {
             metadataTask = Task { @MainActor [weak self] in
                 let extracted = await MetadataManager.extract(from: url)
                 
@@ -48,12 +54,15 @@ class AudioEngine: NSObject, ObservableObject, AVAudioPlayerDelegate {
                 self?.metadata = extracted
                 self?.trackName = extracted.title
             }
+            }
 
             play()
+            return isPlaying
             
         } catch {
             player = nil
             errorMessage = error.localizedDescription
+            return false
         }
     }
     
@@ -85,8 +94,9 @@ class AudioEngine: NSObject, ObservableObject, AVAudioPlayerDelegate {
     }
     
     func seek(to time: Double) {
-        player?.currentTime = time
-        currentTime = time
+        let bounded = min(max(time, 0), duration)
+        player?.currentTime = bounded
+        currentTime = bounded
     }
     
     private func startTimer() {
@@ -105,9 +115,11 @@ class AudioEngine: NSObject, ObservableObject, AVAudioPlayerDelegate {
         _ player: AVAudioPlayer,
         successfully flag: Bool
     ) {
+        guard player === self.player else { return }
         timer?.invalidate()
         isPlaying = false
         currentTime = duration
+        if flag { onFinished?() } else { errorMessage = "Playback ended unexpectedly." }
     }
     
     deinit {
