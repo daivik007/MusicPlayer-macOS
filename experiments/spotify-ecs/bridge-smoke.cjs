@@ -66,9 +66,9 @@ function launch(extra = []) {
     console.log(`Play something in the ECS window. Sampling playback.state for ${watchSec}s...`);
     let maxT = 0, sawAudible = false, first = null;
     for (let i = 0; i < watchSec; i++) {
-      const p = (await a.send('playback.state')).result; const t = p.element?.currentTimeSec ?? 0;
-      if (first === null && t > 0) first = t; maxT = Math.max(maxT, t); sawAudible ||= !!p.audible;
-      console.log(`  ${p.status} audible=${p.audible} t=${t} ${p.mediaSession?.title ?? ''}`); await sleep(1000);
+      const p = (await a.send('playback.state')).result; const t = p.element?.currentTimeSec ?? null;
+      if (typeof t === 'number') { if (first === null && t > 0) first = t; maxT = Math.max(maxT, t); } sawAudible ||= !!p.audible;
+      console.log(`  ${p.status} audible=${p.audible} t=${t ?? 'unavailable'} elements=${p.elementCount ?? 'unknown'} duration=${p.element?.durationSec ?? 'unavailable'} mediaSession=${p.mediaSession?.playbackState ?? 'unknown'} ${p.mediaSession?.title ?? ''}`); await sleep(1000);
     }
     check('playback observed (audible and position advancing)', sawAudible && first !== null && maxT > first, `first=${first} max=${maxT}`);
   }
