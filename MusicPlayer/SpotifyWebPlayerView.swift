@@ -24,6 +24,8 @@ final class SpotifyWebSession: NSObject, ObservableObject, WKNavigationDelegate,
         let config = WKWebViewConfiguration()
         // Persistent WebKit storage is scoped to this app, not Safari.
         config.websiteDataStore = .default()
+        // Request desktop layout through WebKit's public preference, not a forged user agent.
+        config.defaultWebpagePreferences.preferredContentMode = .desktop
         // Spotify may start media asynchronously after the user clicks Play.
         config.mediaTypesRequiringUserActionForPlayback = []
         config.preferences.javaScriptCanOpenWindowsAutomatically = false
@@ -122,6 +124,7 @@ final class SpotifyWebSession: NSObject, ObservableObject, WKNavigationDelegate,
     }
 
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        appendTrace("Navigation started")
         loading = true
         updateNavigation()
     }
@@ -129,6 +132,7 @@ final class SpotifyWebSession: NSObject, ObservableObject, WKNavigationDelegate,
         updateNavigation()
     }
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        appendTrace("Navigation finished")
         loading = false
         updateNavigation()
     }
@@ -149,6 +153,7 @@ final class SpotifyWebSession: NSObject, ObservableObject, WKNavigationDelegate,
         let nsError = error as NSError
         if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled { return }
         // Avoid logging URLs, query parameters, cookies or credentials.
+        appendTrace("Navigation failed (\(nsError.domain), \(nsError.code))")
         errorMessage = "Web page failed to load (\(nsError.domain), \(nsError.code)). Try Reload."
     }
 
@@ -165,6 +170,27 @@ final class SpotifyWebSession: NSObject, ObservableObject, WKNavigationDelegate,
           secureContext: window.isSecureContext,
           visibility: document.visibilityState,
           userAgent: navigator.userAgent,
+          platform: navigator.platform,
+          maxTouchPoints: navigator.maxTouchPoints,
+          viewport: { width: innerWidth, height: innerHeight, devicePixelRatio },
+          pointer: { fine: matchMedia('(pointer: fine)').matches,
+            hover: matchMedia('(hover: hover)').matches },
+          playerBundleHints: (() => {
+            const urls = [...Array.from(document.scripts, s => s.src),
+              ...performance.getEntriesByType('resource').filter(r => r.initiatorType === 'script').map(r => r.name)];
+            let mobile = false, desktop = false, generic = false;
+            for (const raw of urls) {
+              try {
+                const u = new URL(raw);
+                if (u.protocol !== 'https:' || !['open.spotify.com','open.spotifycdn.com','open.scdn.co'].includes(u.hostname)) continue;
+                const p = u.pathname.toLowerCase();
+                if (p.includes('mobile-web-player')) mobile = true;
+                else if (p.includes('desktop-web-player')) desktop = true;
+                else if (p.includes('web-player')) generic = true;
+              } catch (_) {}
+            }
+            return { mobile, desktop, generic };
+          })(),
           encryptedMediaAPI: typeof navigator.requestMediaKeySystemAccess === 'function',
           legacyFairPlay: typeof WebKitMediaKeys !== 'undefined' ?
             (() => { try { return WebKitMediaKeys.isTypeSupported('com.apple.fps.1_0', 'audio/mp4'); }
@@ -218,7 +244,7 @@ final class SpotifyWebSession: NSObject, ObservableObject, WKNavigationDelegate,
         do {
             let result = try await webView.callAsyncJavaScript(script, arguments: [:], in: nil, contentWorld: .page)
             let payload = result as? String ?? "Unexpected JavaScript response."
-            report = "macOS: \(ProcessInfo.processInfo.operatingSystemVersionString)\nMedia gesture requirement: none (experimental)\n\n" + payload + "\n\nObserved events (latest 120):\n" + (trace.isEmpty ? "None" : trace.joined(separator: "\n"))
+            report = "macOS: \(ProcessInfo.processInfo.operatingSystemVersionString)\nMedia gesture requirement: none (experimental)\nPreferred content mode: desktop\nCustom user agent: none\n\n" + payload + "\n\nObserved events (latest 120):\n" + (trace.isEmpty ? "None" : trace.joined(separator: "\n"))
         } catch {
             let ns = error as NSError
             report = "Diagnostic script failed (\(ns.domain), \(ns.code)). Reload and retry."
