@@ -138,9 +138,9 @@ struct ContentView: View {
                 }
             }
             .frame(minHeight: 140, idealHeight: 220)
-            if !library.upNext.isEmpty {
+            if !library.shuffle && !library.upNext.isEmpty {
                 HStack {
-                    Text(library.shuffle ? "Up Next · Shuffled" : "Up Next").font(.caption).bold()
+                    Text("Up Next").font(.caption).bold()
                     Spacer()
                     Text(library.upNext.map { $0.metadata.title }.joined(separator: " · "))
                         .font(.caption).lineLimit(1).foregroundStyle(.secondary)
