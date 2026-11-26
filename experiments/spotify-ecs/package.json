@@ -5,9 +5,11 @@
   "main": "main.cjs",
   "scripts": {
     "start": "electron .",
-    "check": "node --check main.cjs && node --check worker-trace.cjs && node --check media-trace.cjs && node --check self-tests.cjs && node --check audio-test.js && node --test permission-policy.test.cjs",
+    "check": "node --check main.cjs && node --check worker-trace.cjs && node --check media-trace.cjs && node --check self-tests.cjs && node --check audio-test.js && node --check bridge.cjs && node --check bridge-handlers.cjs && node --check bridge-smoke.cjs && node --test permission-policy.test.cjs bridge.test.cjs bridge-handlers.test.cjs",
     "start:fresh": "electron . --fresh-session",
     "start:clean-ua": "electron . --clean-ua",
+    "start:bridge": "electron . --bridge --clean-ua",
+    "smoke": "node bridge-smoke.cjs",
     "start:fresh-clean-ua": "electron . --fresh-session --clean-ua"
   },
   "devDependencies": {

@@ -15,6 +15,36 @@ const cleanUserAgent=`Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKi
 app.setPath('userData', path.join(app.getPath('appData'), 'MusicPlayer-ECS-Experiment'));
 const home = 'https://open.spotify.com/';
 let win;
+
+// ---- M4B stdio bridge (opt-in via --bridge). Protocol lines go to the real stdout; all other output goes to stderr. ----
+const bridgeMode = process.argv.includes('--bridge');
+let bridge = null, bridgeHandlers = null, runtimeReady = false, duplicateInstance = false, exitReason = null;
+function requestQuit(reason) { exitReason = exitReason ?? reason; app.quit(); setTimeout(() => app.exit(0), 8000).unref(); }
+if (bridgeMode) {
+  const protocolWrite = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (...args) => process.stderr.write(...args); // stray writes can never corrupt the protocol
+  for (const m of ['log', 'info', 'debug']) console[m] = (...a) => console.error(...a);
+  const { createBridge } = require('./bridge.cjs');
+  const { createHandlers } = require('./bridge-handlers.cjs');
+  bridgeHandlers = createHandlers({
+    pid: process.pid, startedAtMs: Date.now(), now: () => Date.now(),
+    versions: { electron: process.versions.electron, chrome: process.versions.chrome, node: process.versions.node, app: app.getVersion() },
+    config: { sessionMode: freshSession ? 'fresh-in-memory' : 'persistent', uaMode: cleanUA ? 'clean-chromium' : 'electron-default' },
+    getWebContents: () => (win && !win.isDestroyed() ? win.webContents : null),
+    isReady: () => runtimeReady, trusted, requestQuit
+  });
+  bridge = createBridge({
+    input: process.stdin, write: (line, cb) => protocolWrite(line, cb), handlers: bridgeHandlers,
+    log: m => console.error('[bridge]', m), onInputClosed: () => requestQuit('stdin-closed') // parent gone => no orphan runtime
+  });
+  process.on('SIGTERM', () => requestQuit('sigterm'));
+  process.on('SIGINT', () => requestQuit('sigint'));
+  bridge.emit('runtime.starting', { pid: process.pid, protocol: 1 });
+  if (!app.requestSingleInstanceLock()) { // one runtime per profile directory
+    duplicateInstance = true;
+    bridge.emit('runtime.error', { code: 'duplicate_instance', message: 'Another ECS runtime already owns this profile' }, () => app.exit(73));
+  }
+}
 const trace = [];
 let started = Date.now();
 function record(event, details = {}) {
@@ -122,6 +152,16 @@ async function createWindow() {
   const wc = win.webContents;
   if (cleanUA) { wc.session.setUserAgent(cleanUserAgent); wc.setUserAgent(cleanUserAgent); } // session covers workers, wc covers this page
   installWorkerTrace(wc.session,record,trusted);
+  if (bridge) { // push auth transitions so the parent need not poll while the user logs in
+    let authTimer;
+    wc.session.cookies.on('changed', (_e, cookie) => {
+      if (cookie?.name !== 'sp_dc') return;
+      clearTimeout(authTimer);
+      authTimer = setTimeout(async () => {
+        try { const r = await bridgeHandlers['auth.status']({}, { afterResponse() {} }); bridge.emit('auth.changed', { state: r.state }); } catch {}
+      }, 400);
+    });
+  }
   wc.on('will-navigate', (e,url) => { if (!allowed(url)) e.preventDefault(); });
   wc.on('will-redirect', (e,url) => { if (!allowed(url)) e.preventDefault(); });
   wc.setWindowOpenHandler(({url}) => {
@@ -166,9 +206,9 @@ async function createWindow() {
       }
     })()`}]).catch(()=>{});
   });
-  wc.on('media-started-playing', () => record('media-started'));
-  wc.on('media-paused', () => record('media-paused'));
-  wc.on('audio-state-changed', (_event, audible) => record('audio-state', {audible: typeof audible === 'boolean' ? audible : wc.isCurrentlyAudible()}));
+  wc.on('media-started-playing', () => { record('media-started'); bridge?.emit('playback.changed', {reason: 'media-started'}); });
+  wc.on('media-paused', () => { record('media-paused'); bridge?.emit('playback.changed', {reason: 'media-paused'}); });
+  wc.on('audio-state-changed', (_event, audible) => { const a = typeof audible === 'boolean' ? audible : wc.isCurrentlyAudible(); record('audio-state', {audible: a}); bridge?.emit('playback.changed', {reason: 'audio-state', audible: a}); });
   wc.on('did-start-loading', () => record('loading-start'));
   wc.on('did-stop-loading', () => record('loading-stop'));
   // Electron navigation events have used both positional and details-object signatures.
@@ -210,8 +250,11 @@ async function createWindow() {
   console.log('Loading Spotify (Chromium Media Trace off by default)...');
   await win.loadURL(home);
   console.log('Spotify document loaded.');
+  runtimeReady = true;
+  bridge?.emit('runtime.ready', {pid: process.pid, uaMode: cleanUA ? 'clean-chromium' : 'electron-default', sessionMode: freshSession ? 'fresh-in-memory' : 'persistent'});
 }
 app.whenReady().then(async () => {
+  if (duplicateInstance) return; // exiting with code 73
   console.log('Runtime:', process.platform, process.arch, process.versions.electron, process.versions.chrome);
   if (!components?.whenReady) throw new Error('Castlabs components API missing; check installed runtime.');
   console.log('Waiting for Widevine component initialization...');
@@ -221,7 +264,9 @@ app.whenReady().then(async () => {
   await createWindow();
 }).catch(error => {
   console.error('Startup failed:', error.message);
+  bridge?.emit('runtime.error', {code: 'startup_failed', message: String(error.message).slice(0, 200)});
   dialog.showErrorBox('ECS startup failed', 'Component initialization or browser startup failed. See terminal output.');
   app.quit();
 });
-app.on('window-all-closed', () => app.quit());
+app.on('before-quit', () => bridge?.emit('runtime.exiting', {reason: exitReason ?? 'app-quit'}));
+app.on('window-all-closed', () => { exitReason = exitReason ?? 'window-closed'; app.quit(); });

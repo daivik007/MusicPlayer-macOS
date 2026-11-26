@@ -1,44 +1,67 @@
-# Spotify ECS experiment
+# Spotify ECS runtime
 
-Independent feasibility test, based on main. Native SwiftUI source, Xcode project, local playback and persistence remain unchanged. Prior OAuth, WebKit and CEF experiments remain on their own branches.
+Independent Electron runtime (Castlabs ECS `45.2.1+wvcus`, Chromium 156) that plays Spotify's own web player with Widevine and AAC. **Spotify audio playback is confirmed working** (M4A). Since M4B it can be driven by the native app over stdio. Not a shipping backend; no ad, DRM or authentication changes.
 
-## Run on Apple Silicon
-Install a supported Node.js LTS and npm if absent (Homebrew: brew install node). From repository root:
+## Root cause of the earlier silence
+Spotify serves the mobile web-player bundle (which builds no media player and registers no service worker) when the User-Agent carries app/Electron tokens. With a plain Chromium UA it serves the desktop bundle and playback works. Client Hints were already identical to Chrome. The fix is the opt-in `--clean-ua` flag; no Client Hints, headers, ads or DRM are modified.
 
+## Run (Apple Silicon)
 ```sh
 cd experiments/spotify-ecs
 npm install
-npm run check
-npm start
+npm run check                 # syntax checks + unit tests (permission policy, bridge protocol, handlers)
+npm run start:clean-ua        # working configuration, persistent session
+npm run start:fresh-clean-ua  # clean UA, in-memory session (log in each time)
+npm run start:bridge          # same as clean UA, plus the stdio bridge (see below)
+npm start                     # Electron's default UA: Spotify serves the mobile bundle, no playback
 ```
+Log in with Spotify's own form. Diagnostics: Experiment > Run Capability Diagnostics (Cmd+Shift+D) prints a sanitized report on the terminal; check `uaMode` is `clean-chromium` and `bundleHints.desktop`/`generic` is true. Profile: `~/Library/Application Support/MusicPlayer-ECS-Experiment` (independent of any browser profile; delete it while ECS is closed to reset).
 
-Pinned Castlabs ECS v45.2.1+wvcus, official GitHub distribution. No CDM copied from browsers; ECS initializes its component via components.whenReady before the browser is opened. First launch requires network. A package lock is generated locally; not yet verified or committed. If initialization fails, capture the terminal error (redact sensitive information); do not bypass signing or sandbox protections.
+## M4B: stdio bridge (`--bridge`)
+Newline-delimited JSON, UTF-8. **stdout carries only protocol lines**; everything else (including `console.log`) is rerouted to stderr. No sockets or HTTP.
 
-Login directly using Spotify's own login form. External identity provider popups may be blocked by the navigation policy. Test track playback for 60 seconds, seek, pause/resume and next track using Spotify UI, with normal ads. Menu Experiment > Run Capability Diagnostics (Cmd+Shift+D) prints a sanitized report in terminal. Report AAC and Widevine results and whether seekbar advances and audio is audible. No raw request logging, cookies or tokens collected. DevTools optional; redact credentials.
+```
+request   {"v":1,"id":"<1-64 chars>","cmd":"ping","args":{}}
+response  {"v":1,"id":"<same>","ok":true,"result":{...}}
+          {"v":1,"id":"<same>|null","ok":false,"error":{"code":"...","message":"..."}}
+event     {"v":1,"event":"runtime.ready","data":{...}}          (no id)
+```
+Responses may arrive out of order; match by `id`. Lines over 64k chars are rejected. Error codes: `invalid_json`, `invalid_request`, `unsupported_version`, `unknown_command`, `line_too_long`, `handler_timeout`, `internal_error`, plus per-command codes.
 
-The profile is independent in ~/Library/Application Support/MusicPlayer-ECS-Experiment. No existing browser profile is accessed. Quit ECS after testing. To reset, use Spotify logout; removing that directory while ECS is closed deletes its session and component data.
+| Command | Result |
+|---|---|
+| `ping` | `{pong, time}` |
+| `runtime.status` | `{protocol, pid, ready, uptimeMs, versions, sessionMode, uaMode, window, page:{trusted, loading, loginPage}}` |
+| `auth.status` | `{state: signed-in\|signed-out\|unknown, basis, verified:false, loginPage}` |
+| `playback.state` | `{available, status: playing\|paused\|idle, audible, muted, mediaSession:{playbackState,title,artist,album}, element:{paused,ended,currentTimeSec,durationSec,...}}` |
+| `shutdown` | `{shuttingDown:true}`, then the runtime exits 0 |
+
+Events: `runtime.starting` (bridge up, components pending), `runtime.ready` (Spotify document loaded), `runtime.error` (`duplicate_instance`, `startup_failed`), `runtime.exiting {reason}`, `playback.changed`, `auth.changed {state}`.
+
+Lifecycle: stdin EOF (parent died), SIGTERM/SIGINT or closing the window all quit the runtime, so no orphan is left. A second runtime on the same profile emits `runtime.error duplicate_instance` and exits 73 (single-instance lock, bridge mode only). `shutdown` drops commands still in flight.
+
+### What is and is not reliable
+- `auth.status` is a heuristic: presence of Spotify's own `sp_dc` cookie (value never read out). A server-side revoked session is not detected. No supported auth API exists in the web player.
+- `playback.state` reads `navigator.mediaSession`, the page's media element and Chromium audibility, read-only. Title/artist/position depend on Spotify's page and may be missing; treat them as best effort. **There are no playback control commands** (play/pause/seek/next); the only control surface is Spotify's UI, and automating it is out of scope.
+- The window stays visible; it is needed to log in.
+
+## Native side (SwiftUI app)
+`MusicPlayer/ECS/` (auto-included by the Xcode synchronized folder): `ECSProtocol.swift` (wire/typed models, configuration), `ECSRuntime.swift` (`actor` owning the `Process`: start/ready/timeouts/crash/stop/duplicate guard), `ECSDebugSmoke.swift` (DEBUG only). No UI or local-playback code changed.
+
+```swift
+let runtime = ECSRuntime(configuration: .development(appDirectory: ecsURL))  // adds --bridge --clean-ua
+try await runtime.start()                 // returns at runtime.ready
+let auth = try await runtime.authStatus()
+let play = try await runtime.playbackState()
+await runtime.stop()                      // shutdown command -> SIGTERM -> SIGKILL
+```
+### Sandbox (blocking for local runs)
+The app currently has **App Sandbox enabled**. A sandboxed app cannot launch an unsigned external Electron binary or read this folder, so `start()` will fail. For development, turn App Sandbox off for the Debug configuration (Xcode: target > Signing & Capabilities > remove App Sandbox, or `ENABLE_APP_SANDBOX = NO` in Debug). This was deliberately not changed here. Shipping would need a signed, bundled runtime with the inherit entitlement, or a different architecture.
+
+## Tests
+- `npm run check`: syntax + 22 unit tests, including real child-process tests of the stdout/stderr split, malformed input, oversize lines and EOF shutdown.
+- `npm run smoke` (real Electron, needs macOS): ping/status, malformed input, duplicate refusal, `kill -9` crash, restart, session persistence, clean shutdown. Options: `--login-wait 180`, `--watch-playback 15` (start a track and it checks audible + advancing position), `--expect-signed-in`, `--fresh`.
+- Swift end-to-end: run the app from Xcode (sandbox off) with env `MUSICPLAYER_ECS_SMOKE_DIR=<abs path to experiments/spotify-ecs>`; watch `[ECS smoke]` lines.
 
 ## Limits
-Development VMP signatures may not be accepted by Spotify production license servers; successful capability tests do not prove actual playback. Production signing, authorization and distribution feasibility require separate review. No ad modification, UA spoofing, native playback bridge, library sync or binary distribution. This is not a shipping backend. No subscription or Spotify developer credentials needed for the test itself. Runtime install and playback must be tested on macOS.
-
-Sources:
-- https://github.com/castlabs/electron-releases
-- https://github.com/castlabs/electron-releases/releases/tag/v45.2.1+wvcus
-- https://www.electronjs.org/docs/latest/tutorial/security
-
-CEF baseline: user-built ARM64 sample launched, Spotify showed playing but seekbar stalled. AAC capability empty; Widevine AAC rejected, Opus and VP9 accepted. Safari and Phi played normally. ECS tests whether a different media stack helps; exact cause remains unverified.
-
-## Playback trace update
-The previous blanket denial is replaced with a mediaKeySystem-only permission policy scoped to HTTPS open.spotify.com, the experiment webContents and trusted requester; explicit subframe requests and unknown origins are denied. All other permissions remain denied. Electron permission APIs: https://www.electronjs.org/docs/latest/api/session . The trace includes permission decisions, native playback/audibility events, navigation and categorized Spotify network status/errors. No raw URLs, headers, payloads, license material or account identifiers are recorded. Possible-license classification is a path-name heuristic, not proof of a DRM transaction; requests outside the selected domains or categories may be missed. Run npm run check for policy tests, then npm start. After login, select Experiment > Reset Playback Trace, click Play, wait 10 seconds, and press Cmd+Shift+D. Copy terminal report. Capability probes themselves may add permission events. No UA changes, DRM bypass or production signing changes. Local playback remains unverified.
-
-## Independent diagnostic suite
-Experiment > Test Unencrypted Audio opens a local page with generated five-second WAV and Web Audio tones. Lower volume first; test each button and report whether audible and whether WAV time advances. Experiment > Test Widevine (Castlabs Lab) opens https://castlabs.github.io/wv-vmp-lab/ in a separate nonpersistent session with DRM permission only for the lab origin. Use default UAT backend, select test content, click Load Content, then Play. Report CDM version, VMP status and whether video/audio actually plays; never send raw license messages or tokens. Official lab: https://github.com/castlabs/wv-vmp-lab. Close test windows before retesting Spotify. Native events from tests enter the bounded main trace, prefixed by audio: or drm:. Reset Playback Trace before Spotify Play. Exact permission names are now logged, with policy unchanged. Component version reporting is best effort via components.status(); older ECS may not expose version, so use lab report if missing. DOM media event monitoring runs in an isolated world after document load, and may miss detached elements, early events or cross-origin frames. No CDM changes, signing changes, user agent spoofing or native SwiftUI changes. Local runtime testing pending.
-
-## Background Sync and Chromium Media trace
-Allow only one-shot background-sync for the exact Spotify origin in the isolated Spotify partition, including origin-verified service-worker checks where Electron supplies null webContents. Periodic sync and unrelated permissions remain denied. Existing DRM policy unchanged. The report now includes service-worker controller/registration states (no scripts or scopes), navigation type, detailed navigation events and Chromium Media domain events with local numeric player IDs and allowlisted fields. Media.enable attaches before initial page load, is read-only, and can detach when DevTools opens; close DevTools and select Experiment > Enable Chromium Media Trace before testing. No raw CDP messages, media URLs, credentials, license payloads or request bodies are logged. Reset trace, try playback, collect Cmd+Shift+D report. CDP support and service-worker availability are runtime-dependent; absence of player events is not conclusive. User reported both independent audio and Castlabs protected-media tests passed; Spotify remains silent. No UA/signing/DRM changes, no native SwiftUI changes. References: https://www.electronjs.org/docs/latest/api/session and https://www.electronjs.org/docs/latest/api/web-contents/ and https://chromedevtools.github.io/devtools-protocol/tot/Media/ .
-
-## White-window regression mitigation
-CDP Media attachment is now opt-in after Spotify loads, not a prerequisite to navigation. Enable has a five-second timeout and detaches on failure; Disable Chromium Media Trace is available. Startup logs document load and renderer exit status. If the window remains blank with tracing off, report terminal output; the cause is not yet established. Background Sync and the remaining diagnostics are retained. No session deletion or native changes.
-
-## Controlled browser compatibility comparison
-Run npm start for the existing persistent baseline. Quit ECS fully, then run npm run start:fresh to use a unique nonpersistent partition. Login again only in the fresh session; quitting discards its browsing session without touching the existing persistent login. Keep account, track, window size and network constant. No user-agent or Client Hints override, no service-worker registration or modification, and no permission changes. Diagnostics include low-entropy UA Client Hints, platform, viewport and pointer/touch information, session mode, existing service-worker registration/controller states and best-effort worker lifecycle and console severity monitoring. No worker scripts, scopes, console text, URLs, credentials or tokens are printed. Some Electron versions do not emit all worker events; page listeners start after document load and may miss early registration failures. Capture a report before resetting trace if testing initialization, then reset and try Play. Compare persistent and fresh reports against the working Phi baseline. Media trace remains opt-in and must not delay navigation. No native source changes. Local ECS test pending.
+Spotify can change bundle selection server-side; keep the `bundleHints` check. Wrapping Spotify's web player may conflict with its terms; this is a personal experiment, and the official route is the Web Playback SDK (Premium). Electron adds several hundred MB. Production VMP signing and distribution are unreviewed.
