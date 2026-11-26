@@ -1,10 +1,9 @@
 #if DEBUG
 import Foundation
-import OSLog
 
 // M4B: opt-in developer smoke test. Does nothing unless MUSICPLAYER_ECS_SMOKE_DIR points at experiments/spotify-ecs.
 // Needs a build where the App Sandbox is off (see experiments/spotify-ecs/README.md). Results print to the Xcode
-// console and the unified log (subsystem = bundle id, category "ECS"). It never touches local playback or the UI.
+// console. It never touches local playback or the UI.
 enum ECSDebugSmoke {
     static func runIfRequested() async {
         guard let dir = ProcessInfo.processInfo.environment["MUSICPLAYER_ECS_SMOKE_DIR"] else { return }
@@ -40,7 +39,13 @@ enum ECSDebugSmoke {
         do { let r = try await runtime.runtimeStatus(); check("runtime.status clean UA", r["uaMode"]?.stringValue == "clean-chromium", "\(r)") } catch { check("runtime.status", false, "\(error)") }
         var auth = "unknown"
         do { let a = try await runtime.authStatus(); auth = a.state; check("auth.status", ["signed-in", "signed-out"].contains(a.state), a.state) } catch { check("auth.status", false, "\(error)") }
-        do { let p = try await runtime.playbackState(); check("playback.state", p.available, "status=\(p.status ?? "-") audible=\(p.audible.map(String.init) ?? "-") t=\(p.element?.currentTimeSec.map(String.init) ?? "-")") } catch { check("playback.state", false, "\(error)") }
+        do {
+            let p = try await runtime.playbackState()
+            let audible = p.audible.map { String($0) } ?? "unavailable"
+            let position = p.element?.currentTimeSec.map { String($0) } ?? "unavailable"
+            let duration = p.element?.durationSec.map { String($0) } ?? "unavailable"
+            check("playback.state", p.available, "status=\(p.status ?? p.reason ?? "unavailable") audible=\(audible) position=\(position) duration=\(duration)")
+        } catch { check("playback.state", false, "\(error)") }
 
         // Remote error path and malformed input must not break the session.
         do { _ = try await runtime.send("no.such.command"); check("unknown command rejected", false) }

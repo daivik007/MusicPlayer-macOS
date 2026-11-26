@@ -4,7 +4,7 @@ import Foundation
 // Protocol: newline-delimited JSON, see experiments/spotify-ecs/bridge.cjs.
 // The module defaults to MainActor isolation, so everything shared with the ECSRuntime actor is explicitly nonisolated.
 
-nonisolated enum JSONValue: Sendable, Equatable {
+nonisolated enum JSONValue: Sendable, Equatable, Codable {
     case null
     case bool(Bool)
     case number(Double)
@@ -19,9 +19,7 @@ nonisolated enum JSONValue: Sendable, Equatable {
     var stringValue: String? { if case .string(let s) = self { return s }; return nil }
     var boolValue: Bool? { if case .bool(let b) = self { return b }; return nil }
     var doubleValue: Double? { if case .number(let d) = self { return d }; return nil }
-}
 
-extension JSONValue: Codable {
     nonisolated init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
         if container.decodeNil() { self = .null }

@@ -12,14 +12,15 @@ import OSLog
 nonisolated final class ECSInstanceGuard: @unchecked Sendable {
     static let shared = ECSInstanceGuard()
     private let lock = NSLock()
-    private var owner: ObjectIdentifier?
+    private var owner: UUID?
 
-    func claim(_ id: ObjectIdentifier) -> Bool {
+    func claim(_ id: UUID) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        if owner == nil || owner == id { owner = id; return true }
-        return false
+        guard owner == nil else { return false }
+        owner = id
+        return true
     }
-    func release(_ id: ObjectIdentifier) {
+    func release(_ id: UUID) {
         lock.lock(); defer { lock.unlock() }
         if owner == id { owner = nil }
     }
@@ -36,9 +37,11 @@ actor ECSRuntime {
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "MusicPlayer", category: "ECS")
 
     private var process: Process?
+    private var instanceID: UUID?
     private var stdinHandle: FileHandle?
     private var generation = 0
-    private var stopRequested = false
+    private var shutdownTask: Task<Void, Never>?
+    private var shutdownState: ECSRuntimeState?
     private var pending: [String: AsyncThrowingStream<JSONValue, Error>.Continuation] = [:]
     private var timeouts: [String: Task<Void, Never>] = [:]
     private var readyContinuation: AsyncThrowingStream<Void, Error>.Continuation?
@@ -53,30 +56,34 @@ actor ECSRuntime {
         self.eventContinuation = continuation
     }
 
+    deinit {
+        // The runtime exits on stdin EOF. Its termination handler then releases the guard.
+        try? stdinHandle?.close()
+        readerTasks.forEach { $0.cancel() }
+        restartTask?.cancel()
+        eventContinuation.finish()
+    }
+
     // MARK: Lifecycle
 
     /// Launches the runtime and returns once it reports `runtime.ready` (Spotify's document has loaded).
     func start() async throws {
-        automaticRestartsUsed = 0
-        try await begin()
+        try await begin(manual: true)
     }
 
     /// Graceful stop: `shutdown` command, then SIGTERM, then SIGKILL. Safe to call in any state.
     func stop() async {
         restartTask?.cancel()
         restartTask = nil
-        guard let p = process else {
-            if state != .stopped { setState(.stopped) }
-            ECSInstanceGuard.shared.release(ObjectIdentifier(self))
-            return
+        if let shutdownTask {
+            if process == nil { setState(.stopped) }
+            else { shutdownState = .stopped }
+            await shutdownTask.value
+        } else if process != nil {
+            await shutDown(final: .stopped, graceful: true)
+        } else {
+            setState(.stopped)
         }
-        stopRequested = true
-        setState(.stopping)
-        if stdinHandle != nil { _ = try? await sendInternal("shutdown", args: [:], timeout: 2) }
-        await waitForExit(p, timeout: configuration.shutdownGracePeriod)
-        if p.isRunning { p.terminate(); await waitForExit(p, timeout: 3) }
-        if p.isRunning { kill(p.processIdentifier, SIGKILL); await waitForExit(p, timeout: 2) }
-        teardown(final: .stopped)
     }
 
     func restart() async throws {
@@ -101,14 +108,18 @@ actor ECSRuntime {
 
     // MARK: Start-up
 
-    private func begin() async throws {
-        switch state {
-        case .starting, .ready, .stopping: throw ECSRuntimeError.alreadyRunning
-        default: break
+    private func begin(manual: Bool = false) async throws {
+        try Task.checkCancellation()
+        guard process == nil, shutdownTask == nil else { throw ECSRuntimeError.alreadyRunning }
+        let owner = UUID()
+        guard ECSInstanceGuard.shared.claim(owner) else { throw ECSRuntimeError.alreadyRunning }
+        instanceID = owner
+        if manual {
+            restartTask?.cancel()
+            restartTask = nil
+            automaticRestartsUsed = 0
         }
-        guard ECSInstanceGuard.shared.claim(ObjectIdentifier(self)) else { throw ECSRuntimeError.alreadyRunning }
         setState(.starting)
-        stopRequested = false
 
         signal(SIGPIPE, SIG_IGN) // a dead child must surface as a write error, never kill the app
 
@@ -116,7 +127,7 @@ actor ECSRuntime {
         guard FileManager.default.isExecutableFile(atPath: exe.path) else {
             let reason = "Executable not found at \(exe.path). Run `npm install` in experiments/spotify-ecs."
             setState(.failed(reason))
-            ECSInstanceGuard.shared.release(ObjectIdentifier(self))
+            releaseInstance()
             throw ECSRuntimeError.launchFailed(reason)
         }
 
@@ -137,13 +148,19 @@ actor ECSRuntime {
         let gen = generation
         p.terminationHandler = { [weak self] proc in
             let status = proc.terminationStatus
-            Task { await self?.handleTermination(generation: gen, status: status) }
+            Task {
+                if let self {
+                    await self.handleTermination(generation: gen, status: status)
+                } else {
+                    ECSInstanceGuard.shared.release(owner)
+                }
+            }
         }
 
         do { try p.run() } catch {
             let reason = error.localizedDescription
             setState(.failed(reason))
-            ECSInstanceGuard.shared.release(ObjectIdentifier(self))
+            releaseInstance()
             throw ECSRuntimeError.launchFailed(reason)
         }
         process = p
@@ -170,37 +187,59 @@ actor ECSRuntime {
         }
         defer { timer.cancel() }
 
-        var gotReady = false
         do {
-            for try await _ in readyStream { gotReady = true; break }
+            var iterator = readyStream.makeAsyncIterator()
+            let ready: Void? = try await iterator.next()
+            try Task.checkCancellation()
+            guard ready != nil, gen == generation, state == .ready, p.isRunning else {
+                throw ECSRuntimeError.notRunning
+            }
         } catch {
-            if !stopRequested { abortStart(reason: error) } // a stop() during start already tore everything down
-            throw error
-        }
-        if !gotReady {
-            let error = ECSRuntimeError.processTerminated(exitCode: -1)
-            if !stopRequested { abortStart(reason: error) }
+            if gen == generation, shutdownState == nil {
+                await shutDown(final: .failed(error.localizedDescription), graceful: false)
+            }
             throw error
         }
     }
 
-    private func abortStart(reason: Error) {
-        generation += 1 // invalidate callbacks from this attempt
-        if let p = process {
-            if p.isRunning { p.terminate() }
-            let pid = p.processIdentifier
-            Task { try? await Task.sleep(for: .seconds(3)); if p.isRunning { kill(pid, SIGKILL) } }
+    private func shutDown(final: ECSRuntimeState, graceful: Bool) async {
+        guard let p = process else { return }
+        let gen = generation
+        shutdownState = final
+        setState(.stopping)
+        readyContinuation?.finish(throwing: ECSRuntimeError.notRunning)
+        readyContinuation = nil
+
+        // Every caller waits on the same task. Cancelling a caller cannot cancel child cleanup.
+        let task = Task {
+            if graceful {
+                _ = try? await sendInternal("shutdown", args: [:], timeout: 2)
+                await waitForExit(p, timeout: configuration.shutdownGracePeriod)
+            }
+            if p.isRunning {
+                p.terminate()
+                await waitForExit(p, timeout: 3)
+            }
+            if p.isRunning {
+                kill(p.processIdentifier, SIGKILL)
+                await waitForExit(p, timeout: 2)
+            }
+            // The termination callback may already have performed teardown.
+            if !p.isRunning {
+                handleTermination(generation: gen, status: p.terminationStatus)
+            }
+            shutdownTask = nil
         }
-        failAllPending(ECSRuntimeError.notRunning)
-        teardown(final: .failed(reason.localizedDescription))
+        shutdownTask = task
+        await task.value
     }
 
     // MARK: Incoming data
 
     private func handleStdoutLine(_ line: String, generation gen: Int) {
         guard gen == generation else { return }
-        guard let data = line.data(using: .utf8), !line.isEmpty,
-              let msg = try? JSONDecoder().decode(ECSIncomingMessage.self, from: data) else {
+        guard !line.isEmpty,
+              let msg = try? JSONDecoder().decode(ECSIncomingMessage.self, from: Data(line.utf8)), msg.v == 1 else {
             emit(.log("ignored non-protocol stdout line (\(line.count) chars)"))
             return
         }
@@ -224,10 +263,12 @@ actor ECSRuntime {
     private func handleEvent(name: String, data: JSONValue) {
         switch name {
         case "runtime.ready":
-            if state == .starting { setState(.ready) }
-            readyContinuation?.yield(())
-            readyContinuation?.finish()
-            readyContinuation = nil
+            if state == .starting {
+                // A timeout or cancellation may already have closed the readiness stream.
+                if case .enqueued? = readyContinuation?.yield(()) { setState(.ready) }
+                readyContinuation?.finish()
+                readyContinuation = nil
+            }
         case "runtime.error":
             let code = data["code"]?.stringValue
             let message = data["message"]?.stringValue ?? "runtime error"
@@ -253,11 +294,13 @@ actor ECSRuntime {
     private func handleTermination(generation gen: Int, status: Int32) {
         guard gen == generation else { return }
         let previous = state
-        failAllPending(ECSRuntimeError.processTerminated(exitCode: status))
-        readyContinuation?.finish(throwing: ECSRuntimeError.processTerminated(exitCode: status))
+        let error = ECSRuntimeError.processTerminated(exitCode: status)
+        failAllPending(error)
+        // The exit callback can arrive before stdout delivers runtime.error.
+        readyContinuation?.finish(throwing: status == 73 ? ECSRuntimeError.duplicateRuntimeInstance : error)
         readyContinuation = nil
-        let expected = stopRequested || (status == 0 && previous == .ready) // exit 0 is e.g. the user closing the window
-        teardown(final: expected ? .stopped : .crashed(exitCode: status))
+        let expected = shutdownState != nil || (status == 0 && previous == .ready)
+        teardown(final: shutdownState ?? (expected ? .stopped : .crashed(exitCode: status)))
         if !expected && previous == .ready { scheduleAutomaticRestart() }
     }
 
@@ -273,12 +316,15 @@ actor ECSRuntime {
     }
 
     private func automaticRestart() async {
+        guard !Task.isCancelled else { return }
+        restartTask = nil
         do { try await begin() } catch { emit(.log("automatic restart failed: \(error.localizedDescription)")) }
     }
 
     /// Releases every process resource and moves to a terminal state. Idempotent.
     private func teardown(final newState: ECSRuntimeState) {
         generation += 1
+        shutdownState = nil
         try? stdinHandle?.close()
         stdinHandle = nil
         process = nil
@@ -287,18 +333,28 @@ actor ECSRuntime {
         readyContinuation?.finish(throwing: ECSRuntimeError.notRunning) // unblocks a start() still waiting
         readyContinuation = nil
         failAllPending(ECSRuntimeError.notRunning)
-        ECSInstanceGuard.shared.release(ObjectIdentifier(self))
+        releaseInstance()
         setState(newState)
     }
 
+    private func releaseInstance() {
+        guard let instanceID else { return }
+        ECSInstanceGuard.shared.release(instanceID)
+        self.instanceID = nil
+    }
+
     private func waitForExit(_ p: Process, timeout: TimeInterval) async {
-        let deadline = Date().addingTimeInterval(timeout)
-        while p.isRunning && Date() < deadline { try? await Task.sleep(for: .milliseconds(50)) }
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(timeout))
+        while p.isRunning && clock.now < deadline {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
     }
 
     // MARK: Request plumbing
 
     private func sendInternal(_ command: String, args: [String: JSONValue], timeout: TimeInterval?) async throws -> JSONValue {
+        try Task.checkCancellation()
         guard let handle = stdinHandle else { throw ECSRuntimeError.notRunning }
         let id = UUID().uuidString
         var payload = try JSONEncoder().encode(ECSRequestEnvelope(v: 1, id: id, cmd: command, args: args))
@@ -312,18 +368,14 @@ actor ECSRuntime {
             guard !Task.isCancelled else { return }
             await self?.expire(id: id, command: command)
         }
+        defer { clear(id) }
         do { try handle.write(contentsOf: payload) } catch {
-            clear(id)
             throw ECSRuntimeError.notRunning
         }
-        do {
-            for try await value in stream { clear(id); return value }
-        } catch {
-            clear(id)
-            throw error
-        }
-        clear(id)
-        if Task.isCancelled { throw CancellationError() }
+        var iterator = stream.makeAsyncIterator()
+        let value = try await iterator.next()
+        try Task.checkCancellation()
+        if let value { return value }
         throw ECSRuntimeError.malformedResponse
     }
 
