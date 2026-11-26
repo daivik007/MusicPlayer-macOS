@@ -40,10 +40,11 @@ Events: `runtime.starting` (bridge up, components pending), `runtime.ready` (Spo
 
 Lifecycle: stdin EOF (parent died), SIGTERM/SIGINT or closing the window all quit the runtime, so no orphan is left. A second runtime on the same profile emits `runtime.error duplicate_instance` and exits 73 (single-instance lock, bridge mode only). `shutdown` drops commands still in flight.
 
-### What is and is not reliable
-- `auth.status` is a heuristic: presence of Spotify's own `sp_dc` cookie (value never read out). A server-side revoked session is not detected. No supported auth API exists in the web player.
-- `playback.state` reads `navigator.mediaSession`, the page's media element and Chromium audibility, read-only. Title/artist/position depend on Spotify's page and may be missing; treat them as best effort. **There are no playback control commands** (play/pause/seek/next); the only control surface is Spotify's UI, and automating it is out of scope.
-- The window stays visible; it is needed to log in.
+### Authentication and playback status
+
+- `auth.status` uses the presence of a nonempty, unexpired Spotify login cookie as a heuristic. The bridge returns `verified: false` and keeps cookie values out of messages.
+- On the tested Apple Silicon Mac, Spotify audio played through the independent runtime, including advertisements. Chromium reported audibility and MediaSession exposed track titles. The probe found zero document media elements during songs and ads, so position and duration were unavailable. MediaSession reported playback state `none` in those samples.
+- The Electron window provides the Spotify playback and login UI. Supported playback controls and reliable position and duration remain open for M4C investigation.
 
 ## Native side (SwiftUI app)
 `MusicPlayer/ECS/` (auto-included by the Xcode synchronized folder): `ECSProtocol.swift` (wire/typed models, configuration), `ECSRuntime.swift` (`actor` owning the `Process`: start/ready/timeouts/crash/stop/duplicate guard), `ECSDebugSmoke.swift` (DEBUG only). No UI or local-playback code changed.
@@ -55,13 +56,44 @@ let auth = try await runtime.authStatus()
 let play = try await runtime.playbackState()
 await runtime.stop()                      // shutdown command -> SIGTERM -> SIGKILL
 ```
-### Sandbox (blocking for local runs)
-The app currently has **App Sandbox enabled**. A sandboxed app cannot launch an unsigned external Electron binary or read this folder, so `start()` will fail. For development, turn App Sandbox off for the Debug configuration (Xcode: target > Signing & Capabilities > remove App Sandbox, or `ENABLE_APP_SANDBOX = NO` in Debug). This was deliberately not changed here. Shipping would need a signed, bundled runtime with the inherit entitlement, or a different architecture.
+
+### Debug smoke build on macOS
+
+The regular Debug and Release builds use App Sandbox and the checked-in entitlements. Launching the repository's Electron executable requires a separate Debug build with App Sandbox disabled. Clear `CODE_SIGN_ENTITLEMENTS` for this build because `MusicPlayer.entitlements` also explicitly enables the sandbox. Run from the repository root with Xcode and a macOS SDK that supports the project's macOS 27 deployment target.
+
+```sh
+repo="$PWD"
+(cd "$repo/experiments/spotify-ecs" && npm install)
+xcodebuild -list -project MusicPlayer.xcodeproj
+smoke_build=$(mktemp -d)
+xcodebuild -project MusicPlayer.xcodeproj -scheme MusicPlayer -configuration Debug \
+  -destination 'platform=macOS' -derivedDataPath "$smoke_build" \
+  ENABLE_APP_SANDBOX=NO CODE_SIGN_ENTITLEMENTS= ENABLE_USER_SELECTED_FILES= build
+app="$smoke_build/Build/Products/Debug/MusicPlayer.app"
+codesign -d --entitlements :- "$app"
+MUSICPLAYER_ECS_SMOKE_DIR="$repo/experiments/spotify-ecs" "$app/Contents/MacOS/MusicPlayer"
+```
+
+Check the signed entitlements for absence of `com.apple.security.app-sandbox` before launching. Close any existing ECS window first so the smoke test can use the persistent profile. Watch for `[ECS smoke] done, 0 failure(s)`. The smoke build runs outside the normal app container. Use the regular sandboxed build for the local FLAC and library persistence checks in `ARCHITECTURE.md`.
 
 ## Tests
-- `npm run check`: syntax + 22 unit tests, including real child-process tests of the stdout/stderr split, malformed input, oversize lines and EOF shutdown.
-- `npm run smoke` (real Electron, needs macOS): ping/status, malformed input, duplicate refusal, `kill -9` crash, restart, session persistence, clean shutdown. Options: `--login-wait 180`, `--watch-playback 15` (start a track and it checks audible + advancing position), `--expect-signed-in`, `--fresh`.
-- Swift end-to-end: run the app from Xcode (sandbox off) with env `MUSICPLAYER_ECS_SMOKE_DIR=<abs path to experiments/spotify-ecs>`; watch `[ECS smoke]` lines.
+
+- `npm run check` runs syntax checks and 22 Node tests, including real child-process checks for stdout/stderr separation, malformed input and stdin EOF.
+- The Swift lifecycle tests exercise a Node fixture over real pipes without launching Spotify. From the repository root on macOS, run:
+
+  ```sh
+  test_build=$(mktemp -d)
+  xcrun --sdk macosx swiftc -swift-version 5 -default-isolation MainActor \
+    -enable-upcoming-feature NonisolatedNonsendingByDefault \
+    -enable-upcoming-feature InferIsolatedConformances \
+    -enable-upcoming-feature MemberImportVisibility -D DEBUG \
+    MusicPlayer/ECS/*.swift experiments/spotify-ecs/native-runtime.test.swift \
+    -o "$test_build/ecs-runtime-tests"
+  "$test_build/ecs-runtime-tests" "$(command -v node)" \
+    "$PWD/experiments/spotify-ecs/bridge-test-host.cjs"
+  ```
+
+- `npm run smoke` exercises real Electron on macOS. Prior runs verified bridge readiness, commands, duplicate-instance refusal, crash recovery, cookie retention and clean shutdown. The optional `--watch-playback` assertion still requires both audibility and advancing position. It failed in the prior Spotify runs because the probe had no position samples.
 
 ## Limits
 Spotify can change bundle selection server-side; keep the `bundleHints` check. Wrapping Spotify's web player may conflict with its terms; this is a personal experiment, and the official route is the Web Playback SDK (Premium). Electron adds several hundred MB. Production VMP signing and distribution are unreviewed.

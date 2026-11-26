@@ -38,4 +38,6 @@ State includes stable track IDs, queue order, shuffle/repeat, last track and pos
 
 ## M4B ECS bridge (experiment branch)
 
-The Spotify web player runs in an independent Electron (Castlabs ECS) process, launched and supervised by `ECSRuntime` (a Swift actor in `MusicPlayer/ECS/`). They talk newline-delimited JSON over stdio (no sockets/HTTP); protocol and limits are in `experiments/spotify-ecs/README.md`. The bridge is headless and independent of `AudioEngine`/`LibraryManager`; local playback is unchanged. The App Sandbox must be disabled to launch the runtime in development builds.
+The Swift `ECSRuntime` actor in `MusicPlayer/ECS/` launches and supervises the independent Castlabs Electron runtime. The subprocess exchanges newline-delimited JSON over stdin and stdout and writes diagnostics to stderr. The bridge has no dependency on `AudioEngine` or `LibraryManager`. The experiment README documents the protocol and the opt-in unsandboxed Debug build for the native smoke test.
+
+Earlier macOS Electron tests observed Spotify audio, Chromium audibility, MediaSession track titles and persistence of the cookie-based sign-in heuristic across a runtime restart. The document probe had no playback position or duration. The Xcode build, native Electron smoke test and sandboxed FLAC regression checks remain pending. M4C tracks supported playback controls and position and duration investigation.
