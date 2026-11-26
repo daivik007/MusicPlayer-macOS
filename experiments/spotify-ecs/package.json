@@ -1,0 +1,13 @@
+{
+  "name": "musicplayer-spotify-ecs-experiment",
+  "version": "0.1.0",
+  "private": true,
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "check": "node --check main.cjs"
+  },
+  "devDependencies": {
+    "electron": "https://github.com/castlabs/electron-releases#v45.2.1+wvcus"
+  }
+}
