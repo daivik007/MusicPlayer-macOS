@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(OSLog)
 import OSLog
+#endif
 
 // M4B: owns the ECS (Electron) child process and speaks NDJSON over its stdin/stdout.
 // Headless by design: no UI, no dependency on LibraryManager/AudioEngine. Local playback is untouched.
@@ -34,7 +36,9 @@ actor ECSRuntime {
 
     private let eventContinuation: AsyncStream<ECSRuntimeEvent>.Continuation
     private let configuration: ECSRuntimeConfiguration
+    #if canImport(OSLog)
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "MusicPlayer", category: "ECS")
+    #endif
 
     private var process: Process?
     private var instanceID: UUID?
@@ -170,10 +174,22 @@ actor ECSRuntime {
         let errHandle = errPipe.fileHandleForReading
         readerTasks = [
             Task { [weak self] in
-                do { for try await line in outHandle.bytes.lines { await self?.handleStdoutLine(line, generation: gen) } } catch {}
+                do {
+                    try await ECSPipeReader.readLines(from: outHandle) { [weak self] line in
+                        await self?.handleStdoutLine(line, generation: gen)
+                    }
+                } catch {
+                    await self?.handleStderrLine("stdout read failed: \(error.localizedDescription)", generation: gen)
+                }
             },
             Task { [weak self] in
-                do { for try await line in errHandle.bytes.lines { await self?.handleStderrLine(line, generation: gen) } } catch {}
+                do {
+                    try await ECSPipeReader.readLines(from: errHandle) { [weak self] line in
+                        await self?.handleStderrLine(line, generation: gen)
+                    }
+                } catch {
+                    await self?.handleStderrLine("stderr read failed: \(error.localizedDescription)", generation: gen)
+                }
             }
         ]
 
@@ -285,7 +301,9 @@ actor ECSRuntime {
 
     private func handleStderrLine(_ line: String, generation gen: Int) {
         guard gen == generation else { return }
+        #if canImport(OSLog)
         logger.debug("ecs: \(line, privacy: .private)")
+        #endif
         emit(.log(line))
     }
 
