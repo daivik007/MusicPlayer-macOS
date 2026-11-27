@@ -5,7 +5,7 @@
 - [ ] M3: Persistent library, security-scoped bookmarks, settings (implementation in review).
 - [ ] M4: Spotify OAuth/API feasibility and supported library access.
   - [x] M4A: Spotify playback in an independent ECS runtime (clean User-Agent).
-  - [ ] M4B: Swift–ECS stdio bridge (ping, runtime/auth/playback status, shutdown). Pending macOS app build, native Electron smoke test and local playback regression checks.
+  - [ ] M4B: Swift–ECS stdio bridge (ping, runtime/auth/playback status, shutdown). macOS build, Swift lifecycle fixture and native Electron smoke test passed. Sandboxed local playback regression checks remain pending.
   - [ ] M4C: Supported native Spotify playback controls. Investigate position and duration, which are unavailable from the current document probe.
 - [ ] M5: YouTube Music integration feasibility; official API limitations.
 - [ ] M6: Permissioned extension SDK and isolated runtime.

@@ -78,6 +78,8 @@ Check the signed entitlements for absence of `com.apple.security.app-sandbox` be
 
 ## Tests
 
+At `2f283f4`, the Apple Silicon macOS Debug build succeeded, all five Swift fixture checks passed, and the native Electron smoke test finished with zero failures. Swift received readiness and command responses, rejected a second instance, recovered after a forced crash, observed the signed-in cookie state before and after restart, and shut down cleanly. Spotify was idle during the native smoke test. The regular sandboxed build still needs the local FLAC regression check.
+
 - `npm run check` runs syntax checks and 22 Node tests, including real child-process checks for stdout/stderr separation, malformed input and stdin EOF.
 - The Swift lifecycle tests exercise a Node fixture over real pipes without launching Spotify. From the repository root on macOS, run:
 
