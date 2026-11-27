@@ -4,6 +4,13 @@ const protocolWrite = process.stdout.write.bind(process.stdout);
 process.stdout.write = (...a) => process.stderr.write(...a);
 console.log = (...a) => console.error(...a);
 const fixtureMode = process.argv[2];
+let muted = false;
+let track = 'Fixture track';
+let failNextMute = false;
+const capabilities = {
+  canPlay: false, canPause: false, canSkipNext: false, canSkipPrevious: false, canSeek: false, canSetVolume: false,
+  canSetMuted: true, positionAvailable: false, durationAvailable: false
+};
 if (fixtureMode === 'ignore-term') process.on('SIGTERM', () => {});
 const { createBridge, BridgeError } = require('./bridge.cjs');
 const bridge = createBridge({
@@ -13,9 +20,23 @@ const bridge = createBridge({
     ping: async () => ({ pong: true }),
     'auth.status': async () => ({ state: 'signed-in', basis: 'sp_dc_cookie_presence', verified: false }),
     'playback.state': async () => ({
-      available: true, status: 'playing', audible: true,
-      mediaSession: { playbackState: 'none', title: 'Fixture track' }, element: null
+      available: true, status: 'playing', audible: true, muted, capabilities,
+      mediaSession: { playbackState: 'none', title: track, artworkURL: 'https://i.scdn.co/image/abc123' }, element: null
     }),
+    'playback.setMuted': async args => {
+      if (failNextMute) {
+        failNextMute = false;
+        throw new BridgeError('mute_not_applied', 'Fixture mute failed');
+      }
+      muted = args.muted;
+      return { muted };
+    },
+    'test.changeTrack': async args => {
+      track = args.title;
+      bridge.emit('playback.changed', {});
+      return {};
+    },
+    'test.failNextMute': async () => { failNextMute = true; return {}; },
     echo: async args => args,
     boom: async () => { throw new Error('secret internal detail'); },
     typed: async () => { throw new BridgeError('custom_code', 'typed failure'); },

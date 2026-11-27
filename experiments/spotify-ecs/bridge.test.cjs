@@ -116,6 +116,21 @@ test('real child process: stdout carries only protocol lines, stray console.log 
   assert.match(err, /stray console\.log/);
 });
 
+test('real child process: shutdown acknowledges while a command is pending', { timeout: 3000 }, async t => {
+  const child = spawn(process.execPath, [path.join(__dirname, 'bridge-test-host.cjs')], { stdio: ['pipe', 'pipe', 'ignore'] });
+  t.after(() => { if (child.exitCode === null) child.kill('SIGKILL'); });
+  let stdout = '';
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', chunk => { stdout += chunk; });
+  const closed = new Promise(resolve => child.once('close', resolve));
+  child.stdin.write('{"id":"pending","cmd":"hang"}\n{"id":"stop","cmd":"shutdown"}\n');
+  assert.equal(await closed, 0);
+  const messages = stdout.trimEnd().split('\n').map(line => JSON.parse(line));
+  assert.ok(messages.some(message => message.event === 'test.command-pending' && message.v === 1));
+  assert.ok(messages.some(message => message.id === 'stop' && message.result.shuttingDown));
+  assert.ok(!messages.some(message => message.id === 'pending'));
+});
+
 test('real child process: closing stdin (parent death) terminates the runtime', async () => {
   const child = spawn(process.execPath, [path.join(__dirname, 'bridge-test-host.cjs')], { stdio: ['pipe', 'pipe', 'pipe'] });
   child.stdin.end();

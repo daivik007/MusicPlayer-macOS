@@ -5,12 +5,61 @@ import UniformTypeIdentifiers
 import Combine
 
 struct ContentView: View {
+    let playback: PlaybackController
     
     @StateObject private var audioEngine = AudioEngine()
     @StateObject private var library = LibraryManager()
     private let autosave = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
     
     var body: some View {
+        VStack(spacing: 16) {
+            HStack {
+                Label(playback.source == .local ? "Local Music" : "Spotify",
+                      systemImage: playback.source == .local ? "music.note" : "waveform")
+                    .font(.headline)
+                Spacer()
+                if playback.source == .local {
+                    Button("Spotify") {
+                        Task {
+                            await playback.selectSpotify {
+                                audioEngine.pause()
+                                library.save(using: audioEngine)
+                            }
+                        }
+                    }
+                    .disabled(!playback.spotifyConfigured)
+                    .help(playback.spotifyConfigured ? "Open the Spotify player" : "Spotify requires a configured Debug launch")
+                } else {
+                    Button("Return to Local Music") { Task { await playback.selectLocal() } }
+                        .disabled(playback.switchingToLocal)
+                        .help("Closes the managed Spotify window and returns to the local queue")
+                }
+            }
+
+            if playback.source == .local {
+                localPlayer
+            } else {
+                SpotifyPlayerView(playback: playback)
+            }
+        }
+        .padding(24)
+        .frame(minWidth: 540, idealWidth: 640, minHeight: 700, idealHeight: 850)
+        .onAppear {
+            audioEngine.onFinished = { [weak playback = playback, weak library = library, weak audioEngine = audioEngine] in
+                guard playback?.source == .local, let library, let audioEngine else { return }
+                library.finished(using: audioEngine)
+                library.save(using: audioEngine)
+            }
+        }
+        .task { await library.restore(using: audioEngine) }
+        .onReceive(autosave) { _ in library.save(using: audioEngine, periodic: true) }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+            library.save(using: audioEngine)
+        }
+        .onDisappear { library.save(using: audioEngine) }
+    }
+
+    private var localPlayer: some View {
         VStack(spacing: 16) {
             
             Group {
@@ -209,23 +258,8 @@ struct ContentView: View {
                     .foregroundStyle(.red)
             }
         }
-        .padding(24)
-        .frame(minWidth: 540, idealWidth: 640, minHeight: 700, idealHeight: 850)
-        .onAppear {
-            audioEngine.onFinished = { [weak library, weak audioEngine] in
-                guard let library, let audioEngine else { return }
-                library.finished(using: audioEngine)
-                library.save(using: audioEngine)
-            }
-        }
-        .task { await library.restore(using: audioEngine) }
-        .onReceive(autosave) { _ in library.save(using: audioEngine, periodic: true) }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
-            library.save(using: audioEngine)
-        }
-        .onDisappear { library.save(using: audioEngine) }
     }
-    
+
     private func formatTime(_ time: Double) -> String {
         let seconds = Int(time)
         

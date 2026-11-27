@@ -1,4 +1,5 @@
 import Foundation
+import Observation
 
 @main
 enum ECSRuntimeTests {
@@ -128,12 +129,69 @@ enum ECSRuntimeTests {
                 try await runtime.start()
                 await runtime.stop()
                 print("PASS dropping the runtime closes stdin and releases the guard")
+                try await testPlaybackController(runtime: makeRuntime("slow-shutdown"), slowStartup: makeRuntime("slow-ready"))
                 return
             } catch ECSRuntimeError.alreadyRunning {
                 try await Task.sleep(for: .milliseconds(10))
             }
         }
         throw Failure.check("A dropped runtime still holds the instance guard")
+    }
+
+    static func testPlaybackController(runtime: ECSRuntime, slowStartup: ECSRuntime) async throws {
+        let player = PlaybackController(runtime: runtime)
+        var localPauses = 0
+        let observation = ObservationProbe()
+        withObservationTracking {
+            _ = player.source
+        } onChange: {
+            observation.markChanged()
+        }
+
+        await player.selectSpotify { localPauses += 1 }
+        try await waitFor("initial Spotify state") { player.snapshot?.mediaSession?.title == "Fixture track" }
+        try check(localPauses == 1 && player.source == .spotify, "Selecting Spotify pauses local playback")
+        try check(observation.changed, "Selecting Spotify invalidates the observed source")
+        try check(player.snapshot?.mediaSession?.artworkURL?.host == "i.scdn.co", "Decode artwork URL")
+        try check(player.snapshot?.capabilities?.canSeek == false && player.snapshot?.element == nil, "Unavailable seek and position")
+        try check(player.canSetMuted, "Runtime output mute is available")
+
+        _ = try await runtime.send("test.changeTrack", args: ["title": .string("Second track")])
+        // This deadline is shorter than the fallback poll so it exercises the live event path.
+        try await waitFor("track change event") { player.snapshot?.mediaSession?.title == "Second track" }
+        await player.toggleOutputMute()
+        try check(player.muted == true, "Use the runtime's confirmed mute state")
+        _ = try await runtime.send("test.failNextMute")
+        await player.toggleOutputMute()
+        try check(player.muted == true && player.actionError?.contains("mute_not_applied") == true, "Propagate the command error")
+
+        await runtime.debugKillProcess()
+        try await waitFor("runtime crash clears the snapshot") {
+            if case .crashed = player.connection { return player.snapshot == nil && !player.canSetMuted }
+            return false
+        }
+        await player.connect()
+        try await waitFor("state after reconnect") { player.snapshot?.mediaSession?.title == "Fixture track" && player.muted == false }
+        await player.selectLocal()
+        try await check(runtime.state == .stopped, "Local selection waits for Spotify shutdown")
+        try check(player.source == .local && player.snapshot == nil, "Restore local selection after disconnect")
+
+        let slow = PlaybackController(runtime: slowStartup)
+        let starting = Task { await slow.selectSpotify {} }
+        try await waitFor("Spotify startup") { slow.connection == .starting }
+        await slow.selectLocal()
+        await starting.value
+        try await check(slowStartup.state == .stopped, "Switching during startup leaves no Spotify runtime")
+        try check(slow.source == .local, "Local controls return after cancelling startup")
+        print("PASS playback state, observation, mute errors, provider switching and reconnect")
+    }
+
+    static func waitFor(_ name: String, condition: () -> Bool) async throws {
+        for _ in 0..<200 {
+            if condition() { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        throw Failure.check("Timed out waiting for \(name)")
     }
 
     static func check(_ result: Bool, _ message: String) throws {
@@ -181,4 +239,12 @@ actor EventCollector {
         }
         throw ECSRuntimeTests.Failure.check("Missing event \(name)")
     }
+}
+
+nonisolated final class ObservationProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    var changed: Bool { lock.withLock { value } }
+    func markChanged() { lock.withLock { value = true } }
 }

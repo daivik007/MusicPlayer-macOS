@@ -224,7 +224,9 @@ async function createWindow() {
   mediaTrace=installMediaTrace(wc,record,trusted);
   wc.on('render-process-gone', (_e,details) => {
     bridge?.emit('playback.changed', {reason: 'renderer-gone'});
-    record('renderer-gone'); console.log('Renderer exited:',details.reason,details.exitCode); });
+    record('renderer-gone');
+    console.log('Renderer exited:',details.reason,details.exitCode);
+  });
   wc.session.webRequest.onCompleted(details => {
     const kind = networkKind(details.url, details.resourceType);
     if (kind && (kind === 'possible-license' || kind === 'media' || details.statusCode >= 400))
