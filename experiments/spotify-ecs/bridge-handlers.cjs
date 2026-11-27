@@ -1,5 +1,5 @@
 'use strict';
-// M4B: command handlers. Electron objects arrive through `ctx`, so this module is testable with stubs.
+// ECS bridge command handlers. Electron objects arrive through `ctx`, so this module is testable with stubs.
 // Everything here is read-only against Spotify's page: no clicks, no input injection, no request modification.
 const { PROTOCOL_VERSION, BridgeError } = require('./bridge.cjs');
 
@@ -10,16 +10,40 @@ function withTimeout(promise, ms, code) {
 }
 const clip = (v, max = 200) => (typeof v === 'string' ? v.slice(0, max) : null);
 const num = v => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+const ranged = (value, min, max) => {
+  const n = num(value);
+  return n !== null && n >= min && n <= max ? n : null;
+};
+
+function artworkURL(value) {
+  if (typeof value !== 'string' || value.length > 256) return null;
+  return /^https:\/\/i\.scdn\.co\/image\/[a-zA-Z0-9]+$/.test(value) ? value : null;
+}
+
+function canSetMuted(wc) {
+  return typeof wc.setAudioMuted === 'function' && typeof wc.isAudioMuted === 'function';
+}
+
+function unsupportedPlayback(validate) {
+  return async args => {
+    if (!validate(args)) throw new BridgeError('invalid_args', 'Invalid playback arguments');
+    throw new BridgeError('unsupported_action', 'Use the Spotify window for this action');
+  };
+}
+
+const noArgs = args => Object.keys(args).length === 0;
+const singleArg = (args, key, valid) => Object.keys(args).length === 1 && valid(args[key]);
 
 // Runs in Spotify's page (main world, read-only). Its output is untrusted input and is re-validated below.
 const PLAYBACK_PROBE = `(() => {
   const ms = navigator.mediaSession;
   const md = ms && ms.metadata;
   const els = [...document.querySelectorAll('audio,video')];
-  const el = els.find(m => !m.paused) || els[0] || null;
+  const active = els.filter(m => !m.paused && !m.ended);
+  const el = active.length === 1 ? active[0] : els.length === 1 ? els[0] : null;
   return {
-    mediaSession: ms ? { playbackState: ms.playbackState, title: md ? md.title : null, artist: md ? md.artist : null, album: md ? md.album : null } : null,
-    element: el ? { paused: el.paused, ended: el.ended, currentTime: el.currentTime, duration: el.duration, readyState: el.readyState, muted: el.muted } : null,
+    mediaSession: ms ? { playbackState: ms.playbackState, title: md ? md.title : null, artist: md ? md.artist : null, album: md ? md.album : null, artwork: md ? md.artwork.slice(0, 8).map(a => a.src) : [] } : null,
+    element: el ? { paused: el.paused, ended: el.ended, currentTime: el.currentTime, duration: el.duration, readyState: el.readyState, muted: el.muted, volume: el.volume } : null,
     elementCount: els.length
   };
 })()`;
@@ -61,28 +85,71 @@ function createHandlers(ctx) {
       return { state: present ? 'signed-in' : 'signed-out', basis: 'sp_dc_cookie_presence', verified: false, loginPage };
     },
 
-    // Sources: webContents audibility (Chromium) + navigator.mediaSession + the page's media element, all read-only.
-    // Position/duration come from the element and may be absent depending on how Spotify's player is built.
     'playback.state': async () => {
       const wc = ctx.getWebContents();
       if (!wc) return { available: false, reason: 'not_ready' };
-      if (!ctx.trusted(wc.getURL())) return { available: false, reason: 'page_not_spotify_player' };
+      const frame = wc.mainFrame;
+      const onSpotify = () => !wc.isDestroyed() && wc.mainFrame === frame && ctx.trusted(frame?.url);
+      if (!onSpotify()) return { available: false, reason: 'page_not_spotify_player' };
+
       let page;
-      try { page = await withTimeout(wc.executeJavaScript(PLAYBACK_PROBE), 2000, 'playback_timeout'); }
-      catch (e) { if (e instanceof BridgeError) throw e; return { available: false, reason: 'probe_failed' }; }
-      const ms = page && page.mediaSession ? {
-        playbackState: ['playing', 'paused', 'none'].includes(page.mediaSession.playbackState) ? page.mediaSession.playbackState : 'none',
-        title: clip(page.mediaSession.title), artist: clip(page.mediaSession.artist), album: clip(page.mediaSession.album)
+      try {
+        page = await withTimeout(frame.executeJavaScript(PLAYBACK_PROBE), 2000, 'playback_timeout');
+      } catch (e) {
+        if (e instanceof BridgeError) throw e;
+        return { available: false, reason: 'probe_failed' };
+      }
+      if (!onSpotify()) return { available: false, reason: 'page_not_spotify_player' };
+
+      const metadata = page?.mediaSession;
+      const ms = metadata && typeof metadata === 'object' ? {
+        playbackState: ['playing', 'paused', 'none'].includes(metadata.playbackState) ? metadata.playbackState : 'none',
+        title: clip(metadata.title), artist: clip(metadata.artist), album: clip(metadata.album),
+        artworkURL: Array.isArray(metadata.artwork) ? metadata.artwork.slice(0, 8).map(artworkURL).find(Boolean) ?? null : null
       } : null;
-      const el = page && page.element ? {
-        paused: !!page.element.paused, ended: !!page.element.ended, currentTimeSec: num(page.element.currentTime),
-        durationSec: num(page.element.duration), readyState: num(page.element.readyState), muted: !!page.element.muted
+      const media = page?.element;
+      const el = media && typeof media.paused === 'boolean' && typeof media.ended === 'boolean' ? {
+        paused: media.paused, ended: media.ended, currentTimeSec: ranged(media.currentTime, 0, Infinity),
+        durationSec: ranged(media.duration, Number.MIN_VALUE, Infinity), readyState: ranged(media.readyState, 0, 4),
+        muted: typeof media.muted === 'boolean' ? media.muted : null, volume: ranged(media.volume, 0, 1)
       } : null;
       const audible = wc.isCurrentlyAudible();
-      let status = 'idle';
-      if (audible || (el && !el.paused && !el.ended) || (ms && ms.playbackState === 'playing')) status = 'playing';
-      else if ((ms && ms.playbackState === 'paused') || (el && el.paused && el.currentTimeSec > 0)) status = 'paused';
-      return { available: true, status, audible, muted: wc.isAudioMuted(), mediaSession: ms, element: el, elementCount: num(page && page.elementCount) };
+      let status = ms?.title ? 'unknown' : 'idle';
+      if (audible) status = 'playing';
+      else if (el && !el.paused && !el.ended) status = el.readyState !== null && el.readyState < 3 ? 'buffering' : 'playing';
+      else if (ms?.playbackState === 'playing') status = 'playing';
+      else if (ms?.playbackState === 'paused' || (el?.paused && !el.ended && el.currentTimeSec > 0)) status = 'paused';
+      return {
+        available: true, status, audible, muted: wc.isAudioMuted(), mediaSession: ms, element: el,
+        elementCount: ranged(page?.elementCount, 0, Infinity), itemKind: null,
+        capabilities: {
+          canPlay: false, canPause: false, canSkipNext: false, canSkipPrevious: false, canSeek: false, canSetVolume: false,
+          canSetMuted: canSetMuted(wc), positionAvailable: el?.currentTimeSec != null, durationAvailable: el?.durationSec != null
+        }
+      };
+    },
+
+    'playback.play': unsupportedPlayback(noArgs),
+    'playback.pause': unsupportedPlayback(noArgs),
+    'playback.toggle': unsupportedPlayback(noArgs),
+    'playback.next': unsupportedPlayback(noArgs),
+    'playback.previous': unsupportedPlayback(noArgs),
+    'playback.seek': unsupportedPlayback(args => singleArg(args, 'positionSec', v => ranged(v, 0, Infinity) !== null)),
+    'playback.setVolume': unsupportedPlayback(args => singleArg(args, 'volume', v => ranged(v, 0, 1) !== null)),
+
+    'playback.setMuted': async args => {
+      if (!singleArg(args, 'muted', v => typeof v === 'boolean')) {
+        throw new BridgeError('invalid_args', 'Expected one boolean muted argument');
+      }
+      const wc = ctx.getWebContents();
+      if (!wc || wc.isDestroyed() || !ctx.trusted(wc.mainFrame?.url)) {
+        throw new BridgeError('playback_unavailable', 'The Spotify player is unavailable');
+      }
+      if (!canSetMuted(wc)) throw new BridgeError('unsupported_action', 'Runtime output mute is unavailable');
+      wc.setAudioMuted(args.muted);
+      const muted = wc.isAudioMuted();
+      if (muted !== args.muted) throw new BridgeError('mute_not_applied', 'Runtime output mute did not change');
+      return { muted };
     },
 
     shutdown: async (_args, c) => {

@@ -110,6 +110,11 @@ actor ECSRuntime {
     func authStatus() async throws -> ECSAuthStatus { try decode(ECSAuthStatus.self, try await send("auth.status")) }
     func playbackState() async throws -> ECSPlaybackState { try decode(ECSPlaybackState.self, try await send("playback.state")) }
 
+    func setMuted(_ muted: Bool) async throws -> Bool {
+        let result = try await send("playback.setMuted", args: ["muted": .bool(muted)])
+        return try decode(ECSMuteResult.self, result).muted
+    }
+
     // MARK: Start-up
 
     private func begin(manual: Bool = false) async throws {

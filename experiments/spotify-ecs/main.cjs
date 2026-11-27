@@ -184,6 +184,7 @@ async function createWindow() {
     return grant;
   });
   wc.on('did-finish-load', () => {
+    bridge?.emit('playback.changed', {reason: 'document-loaded'});
     if (!trusted(wc.getURL())) return;
     wc.executeJavaScriptInIsolatedWorld(1001,[{code:`(() => {
       if(globalThis.__ecsTrace) return;
@@ -221,7 +222,9 @@ async function createWindow() {
   wc.on('did-frame-navigate',(_e,u,status,_statusText,main)=>record('navigation-commit',{...navDetails(u,false,main),status:Number.isInteger(status)?status:null}));
   wc.on('did-fail-provisional-load',(_e,code,_desc,_url,main)=>record('navigation-failed',{code,mainFrame:!!main}));
   mediaTrace=installMediaTrace(wc,record,trusted);
-  wc.on('render-process-gone', (_e,details) => { record('renderer-gone'); console.log('Renderer exited:',details.reason,details.exitCode); });
+  wc.on('render-process-gone', (_e,details) => {
+    bridge?.emit('playback.changed', {reason: 'renderer-gone'});
+    record('renderer-gone'); console.log('Renderer exited:',details.reason,details.exitCode); });
   wc.session.webRequest.onCompleted(details => {
     const kind = networkKind(details.url, details.resourceType);
     if (kind && (kind === 'possible-license' || kind === 'media' || details.statusCode >= 400))

@@ -81,29 +81,48 @@ nonisolated struct ECSAuthStatus: Decodable, Sendable {
     let reason: String?
 }
 
-nonisolated struct ECSPlaybackState: Decodable, Sendable {
-    nonisolated struct MediaSession: Decodable, Sendable {
+nonisolated struct ECSPlaybackState: Decodable, Sendable, Equatable {
+    nonisolated struct MediaSession: Decodable, Sendable, Equatable {
         let playbackState: String
         let title: String?
         let artist: String?
         let album: String?
+        let artworkURL: URL?
     }
-    nonisolated struct MediaElement: Decodable, Sendable {
+    nonisolated struct MediaElement: Decodable, Sendable, Equatable {
         let paused: Bool
         let ended: Bool
         let currentTimeSec: Double?
         let durationSec: Double?
         let readyState: Double?
-        let muted: Bool
+        let muted: Bool?
+        let volume: Double?
+    }
+    nonisolated struct Capabilities: Decodable, Sendable, Equatable {
+        let canPlay: Bool
+        let canPause: Bool
+        let canSkipNext: Bool
+        let canSkipPrevious: Bool
+        let canSeek: Bool
+        let canSetVolume: Bool
+        let canSetMuted: Bool
+        let positionAvailable: Bool
+        let durationAvailable: Bool
     }
     let available: Bool
     let reason: String?
-    /// "playing", "paused" or "idle" (only when available).
+    /// "playing", "paused", "buffering", "idle" or "unknown" (only when available).
     let status: String?
     let audible: Bool?
     let muted: Bool?
     let mediaSession: MediaSession?
     let element: MediaElement?
+    let itemKind: String?
+    let capabilities: Capabilities?
+}
+
+nonisolated struct ECSMuteResult: Decodable, Sendable {
+    let muted: Bool
 }
 
 // MARK: Runtime state, events, errors
